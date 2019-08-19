@@ -92,7 +92,7 @@ COMPLEX (dp)              :: fn_val
 COMPLEX (dp)  :: p0, q0, p1, q1, r0, r1, ci, factor
 INTEGER       :: i
 REAL (dp), PARAMETER  :: zero = 0.0_dp, half = 0.5_dp, one = 1.0_dp
-REAL (dp), PARAMETER  :: tol1 = 1.0D+10, tol2 = 1.0D-10, error = 5.D-18
+REAL (dp), PARAMETER  :: tol1 = 1.0D+10, tol2 = 1.0D-10, error = 1.0D-16
 INTEGER, PARAMETER    :: ilim = 100000
 
 q0 = one

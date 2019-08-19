@@ -35,8 +35,8 @@
 				<Tool Name="VFPostBuildEventTool"/>
 				<Tool Name="VFManifestTool" SuppressStartupBanner="true"/></Configuration>
 		<Configuration Name="Release|x64">
-				<Tool Name="VFFortranCompilerTool" SuppressStartupBanner="true" Optimization="optimizeFull" UseProcessorExtensions="codeExclusivelyAVX2" Parallelization="true" AdditionalIncludeDirectories="D:\Program Files (x86)\IntelSWTools\compilers_and_libraries_2017.2.187\windows\mkl\include" MtuneConstruct="mcArchHSW" OpenMP="OpenMPParallelCode" RealKIND="realKIND8" FloatingPointModel="strict" FloatingPointSpeculation="fpSpeculationStrict" RuntimeLibrary="rtMultiThreadedDLL" UseMkl="mklParallel"/>
-				<Tool Name="VFLinkerTool" LinkIncremental="linkIncrementalNo" SuppressStartupBanner="true" AdditionalLibraryDirectories="D:\Program Files (x86)\IntelSWTools\compilers_and_libraries_2017\windows\mkl\lib\intel64" SubSystem="subSystemConsole" StackReserveSize="2000000000" LargeAddressAware="addrAwareLarge"/>
+				<Tool Name="VFFortranCompilerTool" SuppressStartupBanner="true" Optimization="optimizeMinSpace" UseProcessorExtensions="codeExclusivelyHost" Parallelization="true" AdditionalIncludeDirectories="D:\Program Files (x86)\IntelSWTools\compilers_and_libraries_2019.0.117\windows\mkl\include" MtuneConstruct="mcArchHSW" OpenMP="OpenMPParallelCode" RealKIND="realKIND8" FloatingPointModel="strict" FloatingPointSpeculation="fpSpeculationStrict" RuntimeLibrary="rtMultiThreadedDLL" UseMkl="mklParallel"/>
+				<Tool Name="VFLinkerTool" LinkIncremental="linkIncrementalNo" SuppressStartupBanner="true" AdditionalLibraryDirectories="D:\Program Files (x86)\IntelSWTools\compilers_and_libraries_2019.0.117\windows\mkl\lib\intel64" SubSystem="subSystemConsole" StackReserveSize="2000000000" LargeAddressAware="addrAwareLarge"/>
 				<Tool Name="VFResourceCompilerTool"/>
 				<Tool Name="VFMidlTool" SuppressStartupBanner="true" TargetEnvironment="midlTargetAMD64"/>
 				<Tool Name="VFCustomBuildTool"/>
@@ -48,7 +48,6 @@
 		<Filter Name="Header Files" Filter="fi;fd"/>
 		<Filter Name="Resource Files" Filter="rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe"/>
 		<Filter Name="Source Files" Filter="f90;for;f;fpp;ftn;def;odl;idl">
-		<File RelativePath=".\c8lib.f90"/>
 		<File RelativePath=".\cincgam.f90"/>
 		<File RelativePath=".\d1mach.f"/>
 		<File RelativePath=".\dqagpe.f"/>
@@ -59,10 +58,8 @@
 		<File RelativePath=".\Global_Const.f90"/>
 		<File RelativePath=".\Integrand.f90"/>
 		<File RelativePath=".\MatrixOperation.f90"/>
-		<File RelativePath=".\r8lib.f90"/>
 		<File RelativePath=".\Sys_Setup.f90"/>
 		<File RelativePath=".\TDvs.f90"/>
-		<File RelativePath=".\zchdc.f"/>
 		<File RelativePath=".\zgpadm.f"/></Filter>
 		<File RelativePath=".\ReadMe.txt"/></Files>
 	<Globals/></VisualStudioProject>

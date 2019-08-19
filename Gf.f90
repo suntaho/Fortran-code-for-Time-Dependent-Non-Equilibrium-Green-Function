@@ -1,7 +1,7 @@
 !======================================================================
 !    calculations associated with Green's functions 
 !======================================================================
-    
+	
 module gfun
   use globaldef
   use omp_lib
@@ -18,7 +18,7 @@ module gfun
   ! de:   energy interval for spectrum  
   !....................................................................
   subroutine transmission(GF,ebgn,eend,de)
-    type(GFtype) :: GF
+	type(GFtype) :: GF
 	integer :: i, j, ierr, nee
 	real(R_KIND) :: ebgn, eend, de
 	real(R_KIND) :: Tf, ee
@@ -94,7 +94,7 @@ module gfun
   ! calculate selfenergy of L/R electrodes, with frequency/energy representation
   !....................................................................
   subroutine selfenergyLR(GF,Ex)
-    type(GFtype) :: GF
+	type(GFtype) :: GF
 	integer :: i, j
 	real(R_KIND) :: Ex
 	complex(R_KIND), allocatable, dimension(:,:) :: heff
@@ -109,7 +109,7 @@ module gfun
 	allocate(bufn(GF%Ddim,GF%Ldim/2),bufm(GF%Ldim/2,GF%Ddim))
 	!bufn = heff(1:GF%Ddim,GF%Ddim+1:GF%Ldim/2+GF%Ddim)
 	!bufm = heff(GF%Ddim+1:GF%Ldim/2+GF%Ddim,1:GF%Ddim)
-    bufn = heff(GF%Ldim/2+1:GF%tdim-GF%Rdim/2,1:GF%Ldim/2)
+	bufn = heff(GF%Ldim/2+1:GF%tdim-GF%Rdim/2,1:GF%Ldim/2)
 	bufm = heff(1:GF%Ldim/2,GF%Ldim/2+1:GF%tdim-GF%Rdim/2)
 	call surfaceGF(GF ,Ex)
 	!call surfaceGF_model(GF,Ex)                  ! other method for surface green function
@@ -123,7 +123,7 @@ module gfun
 	allocate(bufn(GF%Ddim,GF%Rdim/2),bufm(GF%Rdim/2,GF%Ddim))
 	!bufn = heff(1:GF%Ddim,GF%Ldim+GF%Ddim+1:GF%Ldim+GF%Ddim+GF%Rdim/2)
 	!bufm = heff(GF%Ldim+GF%Ddim+1:GF%Ldim+GF%Ddim+GF%Rdim/2,1:GF%Ddim)
-    bufn = heff(GF%Ldim/2+1:GF%tdim-GF%Rdim/2,GF%tdim-GF%Rdim/2+1:GF%tdim)
+	bufn = heff(GF%Ldim/2+1:GF%tdim-GF%Rdim/2,GF%tdim-GF%Rdim/2+1:GF%tdim)
 	bufm = heff(GF%tdim-GF%Rdim/2+1:GF%tdim,GF%Ldim/2+1:GF%tdim-GF%Rdim/2)
 	! call surfaceGF(GF,Ex)                       ! done as calculating left electrode
 	call matrixmulnmo(buf1, GF%GRs, bufm, GF%Rdim/2, GF%Rdim/2, GF%Ddim)
@@ -140,7 +140,7 @@ module gfun
   ! calculate surface green function of electrodes by other model
   !....................................................................
   subroutine surfaceGF_model(GF,Ex)
-    type(GFtype) :: GF
+	type(GFtype) :: GF
 	integer :: i, j, ndim, maxitr
 	real(R_KIND) :: Ex, var
 	complex(R_KIND), allocatable, dimension(:,:) :: Tp, Tm, Sp, Sm, Q, pr_u, pr_v
@@ -281,7 +281,7 @@ module gfun
   ! calculate surface green function of electrodes, method described in note
   !....................................................................
   subroutine surfaceGF(GF,Ex)
-    type(GFtype) :: GF
+	type(GFtype) :: GF
 	integer :: i, j, ndim, maxitr
 	real(R_KIND) :: Ex, var
 	complex(R_KIND), pointer, dimension(:,:) :: zeta, eta, a, b
@@ -385,5 +385,5 @@ module gfun
 	deallocate(zeta,eta,a,b,heff,buf1,buf2,bufinv,idty)
   end subroutine surfaceGF
   
-    
+	
 end module gfun

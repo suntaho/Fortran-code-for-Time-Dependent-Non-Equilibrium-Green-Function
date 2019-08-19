@@ -8,25 +8,26 @@ module integrand_fun
   use gfun
   use Complex_Incomplete_Gamma
   implicit none
-  
+
   contains
-  
-  
+
+
   !....................................................................
   ! calculate time dependent current by nonequilibrium green function
   !....................................................................
   subroutine TDNEGF(GF)
 	type(GFtype) :: GF
-	integer :: i, j, k, m, n, ne, net, tid, ierr, kpnt, ii, u, uu, ndevatm
-    integer :: n_export_orbit_rho
-	real(R_KIND) :: ee, tt, IL, IR, IN
-	real(R_KIND) :: VL, VR
-	real(R_KIND) :: dt, rhonew, rhoold, elowold, pn, db1, db2, db3, ttbuf
+	integer :: i, j, k, m, n, ne, net, tid, ierr, kpnt, ii, u, uu, ndevatm, pp
+	integer :: n_export_orbit_rho
+	real(R_KIND) :: ee, tt, IL, IR, IN, timeold, timenow
+	real(R_KIND) :: VL, VR, thermaleng, fermi_apx
+	real(R_KIND) :: dt, rhonew, rhoold, elowold, elowt, pn, db1, db2, db3, ttbuf
 	real(R_KIND), allocatable, dimension(:,:) :: Itdata					! time-dependent current
 	real(R_KIND), allocatable, dimension(:) :: eiibuf, eii, deii, eiit, deiit
-	complex(R_KIND) :: zbuf1, zbuf2, zbuf3
+	complex(R_KIND) :: zbuf1, zbuf2, zbuf3, zbuf4, zbuf5, ttbuf2
+	complex(R_KIND) :: zbuf1a, zbuf2a, zbuf3a, zbuf4a
 	complex(R_KIND), allocatable, dimension(:) :: eval
-	complex(R_KIND), allocatable, dimension(:,:) :: heff, heff0, sm, sm0, smold   
+	complex(R_KIND), allocatable, dimension(:,:) :: heff, heff0, sm, sm0, smold
 	complex(R_KIND), allocatable, dimension(:,:) :: heffbuf, smbuf
 	complex(R_KIND), allocatable, dimension(:,:) :: buf1, buf2, buf3, idty
 	complex(R_KIND), allocatable, dimension(:,:) :: bufold1, bufold2, bufold3, bufold4
@@ -34,10 +35,11 @@ module integrand_fun
 	complex(R_KIND), allocatable, dimension(:,:) :: KL1, KL2, KR1, KR2, KN1, KN2
 	complex(R_KIND), allocatable, dimension(:,:) :: k1, k2, k3, k4, rhobak
 	complex(R_KIND), allocatable, dimension(:,:) :: Hnow, Hnxt, Snow, Snxt, Snow_rcd, Snxt_rcd
-	complex(R_KIND), allocatable, dimension(:,:) :: Kbuf, Kbuft
+	complex(R_KIND), allocatable, dimension(:,:) :: Kbuf, Kbuft, vectinv, vect0inv
 	complex(R_KIND), allocatable, dimension(:,:,:) :: bufn, bufm, bufn2, bufn3
 	complex(R_KIND), allocatable, dimension(:,:,:) :: bufp, bufq
 	complex(R_KIND), allocatable, dimension(:,:) :: bugx
+	real(R_KIND), allocatable, dimension(:) :: sng_pnti
 	character(255) :: fpath, str
 	logical :: updateK
 	! variables for integral function
@@ -50,11 +52,24 @@ module integrand_fun
 	! for Gauss–Legendre quadrature
 	real(R_KIND) :: ra,rb
 	real(R_KIND), allocatable, dimension(:) :: glx, glw
-	
-    n_export_orbit_rho = anint(1.0/dt_std/1000.0)
-    write(*,*) "iteration interval to export orbital density: ", n_export_orbit_rho
-    
-    ndevatm = size(GF%ccinv,1)
+
+	call mkl_set_dynamic(1)
+	call omp_set_nested(1)
+
+	thermaleng = 100.0_R_KIND*kbT
+	fermi_apx = 1.0_R_KIND/kbT
+	! initialized exp_itp for interpolational exp. function
+	n= aint((exp_itp_up-exp_itp_low)/exp_itp_de)+1
+	allocate(exp_itp(n))
+	do i=1,n
+		ee=exp_itp_low+exp_itp_de*(i-1.0_R_KIND)
+		exp_itp(i)=exp(ee)
+	end do
+
+	n_export_orbit_rho = anint(1.0/dt_std/1000.0)
+	write(*,*) "iteration interval to export orbital density: ", n_export_orbit_rho
+
+	ndevatm = size(GF%ccinv,1)
 	allocate(Itdata(ntstep+1,3))                                        ! time/I_L/I_R
 	allocate(eval(GF%Ddim))
 	allocate(heff(GF%Ddim,GF%Ddim),heff0(GF%Ddim,GF%Ddim),sm(GF%Ddim,GF%Ddim),smold(GF%Ddim,GF%Ddim))
@@ -77,22 +92,22 @@ module integrand_fun
 	forall(i=1:GF%Ddim,j=1:GF%Ddim) idty(i,j) = c_nil
 	forall(i=1:GF%Ddim) idty(i,i) = c_one
 
-	
+
 	if( (TdHS==.true.) .and. (cv_model==.false.)) then                ! use h/s of device from Gromacs for initial setup, avoid the deviation of QM/MM boundary
-		call inputHSt(GF,GF%Ddim,0,.false.)                           ! not orthogonalize h/s here, before orthogonalizing self-energy. 
+		call inputHSt(GF,GF%Ddim,0,.false.)                           ! not orthogonalize h/s here, before orthogonalizing self-energy.
 		GF%HD = GF%Hi
 		GF%SD = GF%Si
 		GF%SD_rcd = GF%Si_rcd
 	end if
-	
-	
+
+
 	mag = 1.0_R_KIND                                                 ! re-scale the imaginary delta energy of retarded/advanced green function
 	! check orthbol = .true. for diag_int>0
 	if( diag_int>0 .and. (.not. orthbol) ) stop "integrand_fun: set orthbol=.true. for diag_int>0 !"
 	if( diag_int==2) write(*,*) "integrand_fun: analytical mode currently supports single-thread only!"
-	
+
 	! read table for Gauss–Legendre quadrature
-	allocate(glx(GLpnt),glw(GLpnt))                               
+	allocate(glx(GLpnt),glw(GLpnt))
 	do i = 1, GLpnt
 		if(GLpnt==1) then
 			glx(i) = GL1(i)
@@ -109,12 +124,12 @@ module integrand_fun
 		else if (GLpnt==5) then
 			glx(i) = GL5(i)
 			glw(i) = GL5w(i)
-		else 
+		else
 			stop "integrand_fun: error on assigning GLpnt! "
 		end if
 	end do
-	
-	
+
+
 	! initialize self energy
 	call selfenergyLR(GF,GF%Ef)                                       ! initialize self-energy of L/R leads
 	! for orthogonal basis
@@ -128,24 +143,24 @@ module integrand_fun
 		call orthHS(buf1,buf2,GF%Ddim)
 		GF%SER = buf1
 		call orthHS(GF%HD,GF%SD,GF%Ddim)                              ! hamiltonian/overlap matrix
-    end if
+	end if
 	! for common cases, real H/S/SE are symmetry
-    if(maxval(abs(GF%HD-transpose(GF%HD)))>delta .or. maxval(abs(GF%SD-transpose(GF%SD)))>delta .or. &
-        & maxval(abs(GF%SD_rcd-transpose(GF%SD_rcd)))>delta .or. maxval(abs(GF%SEL-transpose(GF%SEL)))>delta &
-        & .or. maxval(abs(GF%SER-transpose(GF%SER)))>delta) then
-        write (*,*) "Wraning! real-value H/S matrix is not symmetry for present system? "
-        write (*,*) "HD: ", maxval(abs(GF%HD-transpose(GF%HD)))
-        write (*,*) "SD: ", maxval(abs(GF%SD-transpose(GF%SD)))
-        write (*,*) "SD_rcd: ", maxval(abs(GF%SD_rcd-transpose(GF%SD_rcd)))
-        write (*,*) "SEL: ", maxval(abs(GF%SEL-transpose(GF%SEL)))
-        write (*,*) "SER: ", maxval(abs(GF%SER-transpose(GF%SER)))
-    else
-        GF%HD = 0.5_R_KIND*(GF%HD+transpose(GF%HD))
+	if(maxval(abs(GF%HD-transpose(GF%HD)))>delta .or. maxval(abs(GF%SD-transpose(GF%SD)))>delta .or. &
+		& maxval(abs(GF%SD_rcd-transpose(GF%SD_rcd)))>delta .or. maxval(abs(GF%SEL-transpose(GF%SEL)))>delta &
+		& .or. maxval(abs(GF%SER-transpose(GF%SER)))>delta) then
+		write (*,*) "Wraning! real-value H/S matrix is not symmetry for present system? "
+		write (*,*) "HD: ", maxval(abs(GF%HD-transpose(GF%HD)))
+		write (*,*) "SD: ", maxval(abs(GF%SD-transpose(GF%SD)))
+		write (*,*) "SD_rcd: ", maxval(abs(GF%SD_rcd-transpose(GF%SD_rcd)))
+		write (*,*) "SEL: ", maxval(abs(GF%SEL-transpose(GF%SEL)))
+		write (*,*) "SER: ", maxval(abs(GF%SER-transpose(GF%SER)))
+	else
+		GF%HD = 0.5_R_KIND*(GF%HD+transpose(GF%HD))
 	    GF%SD = 0.5_R_KIND*(GF%SD+transpose(GF%SD))
 	    GF%SD_rcd = 0.5_R_KIND*(GF%SD_rcd+transpose(GF%SD_rcd))
 	    GF%SEL = 0.5_R_KIND*(GF%SEL+transpose(GF%SEL))
 	    GF%SER = 0.5_R_KIND*(GF%SER+transpose(GF%SER))
-    end if
+	end if
 	! assign variables
 	GF%LaL = real(GF%SEL, kind=R_KIND)
 	GF%GaL = -1.0_R_KIND*aimag(GF%SEL)
@@ -159,7 +174,7 @@ module integrand_fun
 	! export self-energy
 	fpath = trim(fout) // "SEL.txt"
 	open(UNIT=199, FILE=trim(fpath), STATUS="REPLACE", IOSTAT=ierr)
-	if(ierr /= 0) stop "integrand_fun: openning energy_SEL.txt in default path is error!"	
+	if(ierr /= 0) stop "integrand_fun: openning energy_SEL.txt in default path is error!"
 	do i = 1,Ddim
 		do j = 1,Ddim
 			write(199,'(I5,A,I5,A,F20.15,A,F20.15)') i, tab, j, tab, real(GF%SEL(i,j),kind=R_KIND), tab, aimag(GF%SEL(i,j))
@@ -168,14 +183,14 @@ module integrand_fun
 	close(199)
 	fpath = trim(fout) // "SER.txt"
 	open(UNIT=299, FILE=trim(fpath), STATUS="REPLACE", IOSTAT=ierr)
-	if(ierr /= 0) stop "integrand_fun: openning energy_SER.txt in default path is error!"	
+	if(ierr /= 0) stop "integrand_fun: openning energy_SER.txt in default path is error!"
 	do i = 1,Ddim
 		do j = 1,Ddim
 			write(299,'(I5,A,I5,A,F20.15,A,F20.15)') i, tab, j, tab, real(GF%SER(i,j),kind=R_KIND), tab, aimag(GF%SER(i,j))
 		end do
 	end do
 	close(299)
-	
+
 	! analyze eigenvalue
 	fpath = trim(fout) // "eigval_hD.txt"                             ! for hD
 	open(UNIT=115, FILE=trim(fpath), STATUS="REPLACE", IOSTAT=ierr)
@@ -215,17 +230,18 @@ module integrand_fun
 		write(116,*) real(eval(i),kind=R_KIND), tab, aimag(eval(i))
 	end do
 	close(116)
-	
+
 	! export fermi distribution function
 	if (diag_int==0) then
-		elow = GF%Ef - abs(Vb) - abs(VLac) - abs(VRac) - 30.0_R_KIND*kbT
-		ehigh = GF%Ef + abs(Vb) + abs(VLac) + abs(VRac) + 30.0_R_KIND*kbT   ! uppper bound for energy integration
+		elow = GF%Ef - abs(Vb) - abs(VLac) - abs(VRac) - thermaleng
+		ehigh = GF%Ef + abs(Vb) + abs(VLac) + abs(VRac) + thermaleng   ! uppper bound for energy integration
 	else if(diag_int==1) then
-		elow = eval(1) - abs(Vb) - abs(VLac) - abs(VRac) - 100.0_R_KIND*kbT
-		ehigh = GF%Ef + abs(Vb) + abs(VLac) + abs(VRac) + 100.0_R_KIND*kbT  ! uppper bound for energy integration
+		elow = real(eval(1),kind=R_KIND) - abs(Vb) - abs(VLac) - abs(VRac) - thermaleng
+		ehigh = GF%Ef + abs(Vb) + abs(VLac) + abs(VRac) + thermaleng  ! uppper bound for energy integration
 	else if(diag_int==2) then
-		elow = eval(1) - abs(Vb) - abs(VLac) - abs(VRac) - 100.0_R_KIND*kbT
-		ehigh = GF%Ef                                                       ! uppper bound for energy integration
+		elow = real(eval(1),kind=R_KIND) - abs(Vb) - abs(VLac) - abs(VRac) - thermaleng
+		ehigh = GF%Ef-kbT                                                       ! uppper bound for energy integration
+		ehigh_apx = GF%Ef + abs(Vb) + abs(VLac) + abs(VRac) + thermaleng
 	end if
 	dee = dee
 	elow = nint(elow/dee)*dee
@@ -239,13 +255,15 @@ module integrand_fun
 		write(112,*) ee, tab, fermi(ee,Ef), Ef
 	end do
 	close(112)
-	
+
 
 	! initialize energy grid
 	heffbuf = GF%HD+GF%SEL+GF%SER                                     ! calculate eigenvalue
 	smbuf = GF%SD
 	call generalized_eigenvalues(heffbuf, smbuf, eval, buf1, buf2, Ddim)! Note! heffbuf/smbuf are overwritten on exit
 	vect0 = buf2
+	vect0inv = vect0
+	call matrixinv(vect0inv,Ddim)
 	forall(i=1:Ddim,j=1:Ddim) valt0(i,j) = c_nil
 	forall(i=1:Ddim) valt0(i,i) = eval(i)
 	do i = 1, Ddim-1                                                  ! sorting eigenvalue by real part
@@ -306,7 +324,7 @@ module integrand_fun
 		! export default energy grid
 		fpath = trim(fout) // "energy_grid_t0.txt"
 		open(UNIT=199, FILE=trim(fpath), STATUS="REPLACE", IOSTAT=ierr)
-		if(ierr /= 0) stop "integrand_fun: openning energy_grid_t0.txt in default path is error!"	
+		if(ierr /= 0) stop "integrand_fun: openning energy_grid_t0.txt in default path is error!"
 		do i = 1, last
 			write(199,'(I5,A,F20.15,A,F20.15,A,F20.15,A,I3)') i, tab, alist(i), tab, blist(i), tab, rlist(i), tab, level(i)
 		end do
@@ -329,14 +347,14 @@ module integrand_fun
 				do m = 1, GLpnt
 					k = k+1
 					eii(k) = glx(m)*(rb-ra)/2.0_R_KIND+(ra+rb)/2.0_R_KIND
-					deii(k) = glw(m)*(rb-ra)/2.0_R_KIND 
+					deii(k) = glw(m)*(rb-ra)/2.0_R_KIND
 				end do
 			end do
 		end do
 		if(k/=ne) stop "integrand_fun: error 1 on generating energy grid for integration of t0!"
 		deallocate(pts,ndin,points)
 	else if ( (.not. t0_intgl_search) .and. diag_int==0) then
-		ne = kpnt                                                     ! add energy grids 
+		ne = kpnt                                                     ! add energy grids
 		do i = 1, kpnt-1
 			db1 = eiibuf(i+1)-eiibuf(i)
 			if(db1>dee) ne = ne+aint(db1/dee)
@@ -354,7 +372,7 @@ module integrand_fun
 					do m = 1, GLpnt
 						k = k+1
 						eii(k) = glx(m)*(rb-ra)/2.0_R_KIND+(ra+rb)/2.0_R_KIND
-						deii(k) = glw(m)*(rb-ra)/2.0_R_KIND 
+						deii(k) = glw(m)*(rb-ra)/2.0_R_KIND
 					end do
 					ra = rb
 				end do
@@ -363,7 +381,7 @@ module integrand_fun
 				do m = 1, GLpnt
 					k = k+1
 					eii(k) = glx(m)*(rb-ra)/2.0_R_KIND+(ra+rb)/2.0_R_KIND
-					deii(k) = glw(m)*(rb-ra)/2.0_R_KIND 
+					deii(k) = glw(m)*(rb-ra)/2.0_R_KIND
 				end do
 				ra = rb
 			end if
@@ -373,13 +391,13 @@ module integrand_fun
 		deallocate(pts,ndin,points)
 	end if
 	if(diag_int>0) deallocate(eiibuf,pts,ndin,points)
-	
-	
+
+
 	if(diag_int==0) then
 		! export assigned energy grid
 		fpath = trim(fout) // "energy_grid__t0_subdivision.txt"
 		open(UNIT=19, FILE=trim(fpath), STATUS="REPLACE", IOSTAT=ierr)
-		if(ierr /= 0) stop "integrand_fun: openning energy_grid__t0_subdivision in default path is error!"	
+		if(ierr /= 0) stop "integrand_fun: openning energy_grid__t0_subdivision in default path is error!"
 		do i = 1, ne
 			write(19,'(I5,A,F20.15,A,F20.15)') i, tab, eii(i), tab, deii(i)
 		end do
@@ -388,13 +406,14 @@ module integrand_fun
 	else
 		fpath = trim(fout) // "energy_grid__t0_subdivision.txt"
 		open(UNIT=19, FILE=trim(fpath), STATUS="REPLACE", IOSTAT=ierr)
-		if(ierr /= 0) stop "integrand_fun: openning energy_grid__t0_subdivision in default path is error!"	
+		if(ierr /= 0) stop "integrand_fun: openning energy_grid__t0_subdivision in default path is error!"
 		close(19)
 	end if
-	
-	
+
+
 	! guess initial charge density
-	if(diag_int<2) call OMP_SET_NUM_THREADS(ncpus)                                ! call opm for later usage
+	!if(diag_int<2) call OMP_SET_NUM_THREADS(ncpus)                                ! call opm for later usage
+	call OMP_SET_NUM_THREADS(ncpus)
 	if(readrho) then
 		! clear old document
 		fpath = trim(fout) // "time-current_pre.txt"
@@ -425,7 +444,7 @@ module integrand_fun
 				tid = OMP_GET_THREAD_NUM()+1
 				! calculate retarded green function
 				ee = eii(i)
-				bufm(:,:,tid) = (ee+c_i*delta*mag)*sm-heff          
+				bufm(:,:,tid) = (ee+c_i*delta*mag)*sm-heff
 				call matrixinv(bufm(:,:,tid),Ddim)
 				! ====== formula type 1 (disable type 2)
 				!bufn(:,:,tid) = bufn(:,:,tid)+fermi(ee,Ef)*aimag(bufm(:,:,tid))*(-2.0_R_KIND*deii(i)/pi)
@@ -434,7 +453,7 @@ module integrand_fun
 				bufq(:,:,tid) = dconjg(transpose(bufm(:,:,tid)))
 				call matrixmul(bufm(:,:,tid), bufp(:,:,tid), bufq(:,:,tid), Ddim)
 				bufn(:,:,tid) = bufn(:,:,tid)+fermi(ee,Ef)*bufm(:,:,tid)*(2.0_R_KIND*deii(i)/pi)
-				
+
 				! show message
 				if(tid .eq. 1) write(*,'(A37,F7.3,A2,A,\)') "initializing charge density...cpu0: ",100.0_R_KIND*i/ne*ncpus," %",creturn
 			end do
@@ -443,7 +462,7 @@ module integrand_fun
 			! collect data from threads
 			forall(i=1:GF%Ddim,j=1:GF%Ddim) GF%rho(i,j) = c_nil
 			do i = 1, ncpus
-				GF%rho = GF%rho+bufn(:,:,i) 
+				GF%rho = GF%rho+bufn(:,:,i)
 			end do
 		else if(diag_int==1) then
 			! find number of eval within elow-ehigh
@@ -461,40 +480,56 @@ module integrand_fun
 			end do
 			! call integrand functions
 			forall(i=1:Ddim,j=1:Ddim) Kbuf(i,j) = c_nil
-			!$OMP PARALLEL DEFAULT(SHARED) PRIVATE(tid,resultr,resulti,abserr,neval,ier,ieri,last)
+			!$OMP PARALLEL DEFAULT(SHARED) PRIVATE(tid,resultr,resulti,abserr,neval,ier,ieri,last,sng_pnti,pp)
 			!$OMP DO
 			do i = 1, Ddim
 				tid = OMP_GET_THREAD_NUM()+1
 				zbufs(1,tid) = valt0(i,i)
-				call dqagpe(integrand1_re,elow,ehigh,ii+2,sng_pnts,0.001_R_KIND*delta,0.001_R_KIND*delta,nitgl,resultr, &
+				if( (real(zbufs(1,tid),kind=R_KIND)>=elow .and. real(zbufs(1,tid),kind=R_KIND)<=ehigh) .and. (aimag(zbufs(1,tid))>=elow .and. aimag(zbufs(1,tid))<=ehigh) ) then
+					pp=4
+					allocate(sng_pnti(pp))
+					sng_pnti(1)=real(zbufs(1,tid),kind=R_KIND)
+					sng_pnti(2)=aimag(zbufs(1,tid))
+				else if( (real(zbufs(1,tid),kind=R_KIND)>=elow .and. real(zbufs(1,tid),kind=R_KIND)<=ehigh) .and. (aimag(zbufs(1,tid))<elow .or. aimag(zbufs(1,tid))>ehigh) ) then
+					pp=3
+					allocate(sng_pnti(pp))
+					sng_pnti(1)=real(zbufs(1,tid),kind=R_KIND)
+				else if( (real(zbufs(1,tid),kind=R_KIND)<elow .or. real(zbufs(1,tid),kind=R_KIND)>ehigh) .and. (aimag(zbufs(1,tid))>=elow .and. aimag(zbufs(1,tid))<=ehigh) ) then
+					pp=3
+					allocate(sng_pnti(pp))
+					sng_pnti(1)=aimag(zbufs(1,tid))
+				else
+					pp=2
+					allocate(sng_pnti(pp))
+				end if
+				call dqagpe(integrand1_re,elow,ehigh,pp,sng_pnti,0.01_R_KIND*delta,0.01_R_KIND*delta,nitgl,resultr, &
 							& abserr,neval,ier,alist_m(:,tid),blist_m(:,tid),rlist_m(:,tid),elist_m(:,tid), &
 							& pts_m(:,tid),iord_m(:,tid),level_m(:,tid),ndin_m(:,tid),last)
-				call dqagpe(integrand1_im,elow,ehigh,ii+2,sng_pnts,0.001_R_KIND*delta,0.001_R_KIND*delta,nitgl,resulti, &
+				call dqagpe(integrand1_im,elow,ehigh,pp,sng_pnti,0.01_R_KIND*delta,0.01_R_KIND*delta,nitgl,resulti, &
 							& abserr,neval,ieri,alist_m(:,tid),blist_m(:,tid),rlist_m(:,tid),elist_m(:,tid), &
 							& pts_m(:,tid),iord_m(:,tid),level_m(:,tid),ndin_m(:,tid),last)
-				if(ier>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of rho_ini !", ier
-				if(ieri>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of rho_ini !", ieri
+				if(ier>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of RE-rho_ini 1!", ier
+				if(ieri>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of IM-rho_ini 1!", ieri
 				Kbuf(i,i) = c_one*resultr+c_i*resulti
+				deallocate(sng_pnti)
 			end do
 			!$OMP END DO
 			!$OMP END PARALLEL
 			deallocate(sng_pnts,ndin_m,pts_m)
-			buf1 = vect0
-			call matrixmul(buf2,buf1,Kbuf,Ddim)
-			call matrixinv(buf1,Ddim)
-			call matrixmul(buf3,buf2,buf1,Ddim)
+			forall(i=1:Ddim,j=1:Ddim) buf2(j,i) = vect0(j,i)*Kbuf(i,i)
+			call matrixmul(buf3,buf2,vect0inv,Ddim)
 			GF%rho = aimag(buf3)*(-2.0_R_KIND/pi)
 		else if(diag_int==2) then
 			forall(i=1:Ddim,j=1:Ddim) Kbuf(i,j) = c_nil
+			zbuf1a = exp(fermi_apx*(ehigh-ehigh_apx))
 			do i = 1, Ddim
 				zbuf1 = ehigh-valt0(i,i)
 				zbuf2 = elow-valt0(i,i)
-				Kbuf(i,i) = cdlog(zbuf1)-cdlog(zbuf2)
+				zbuf3 = ehigh_apx-valt0(i,i)
+				Kbuf(i,i) = log(zbuf1)-log(zbuf2)+( cdig_fun(c_nil,fermi_apx*zbuf1)-zbuf1a*cdig_fun(c_nil,fermi_apx*zbuf3) )
 			end do
-			buf1 = vect0
-			call matrixmul(buf2,buf1,Kbuf,Ddim)
-			call matrixinv(buf1,Ddim)
-			call matrixmul(buf3,buf2,buf1,Ddim)
+			forall(i=1:Ddim,j=1:Ddim) buf2(j,i) = vect0(j,i)*Kbuf(i,i)
+			call matrixmul(buf3,buf2,vect0inv,Ddim)
 			GF%rho = aimag(buf3)*(-2.0_R_KIND/pi)
 		end if
 	end if
@@ -508,7 +543,7 @@ module integrand_fun
 	! time-loops
 	fpath = trim(fout) // "time-current_pre.txt"
 	open(UNIT=113, FILE=trim(fpath), STATUS="REPLACE", IOSTAT=ierr)
-	if(ierr /= 0) stop "integrand_fun: openning time-current_pre.txt in default path is error!"	
+	if(ierr /= 0) stop "integrand_fun: openning time-current_pre.txt in default path is error!"
 	sm0 = GF%SD
 	GF%Hi = GF%HD
 	GF%Si = GF%SD
@@ -528,39 +563,39 @@ module integrand_fun
 		tt = n*dt
 		VL = 0.0_R_KIND
 		VR = 0.0_R_KIND
-		
+
 		heff0 = GF%HD
 		heff = GF%HD
 		smold = GF%SD
 		sm = GF%SD
-		
+
 		if(n==0) then
 			! update the propagator U
 			heff0 = heff0+GF%SEL+GF%SER
 			heff = heff+GF%SEL+GF%SER
 			call c8mat_expm1 ( Ddim, GF%ULi, UL )
 			call c8mat_expm1 ( Ddim, GF%URi, UR )
-			
+
 			! calculate K term
 			! ========== general integration for K1 ==========
 			if(diag_int==0) then
-				forall(i=1:GF%Ddim,j=1:GF%Ddim,k=1:ncpus) bufn(i,j,k) = c_nil 
+				forall(i=1:GF%Ddim,j=1:GF%Ddim,k=1:ncpus) bufn(i,j,k) = c_nil
 				!$OMP PARALLEL DEFAULT(SHARED) PRIVATE(ee,tid)
 				!$OMP DO
 				do i = 1, ne
 					tid = OMP_GET_THREAD_NUM()+1
 					! calculate retarded green function
 					ee = eii(i)
-					bufm(:,:,tid) = (ee+c_i*delta*mag)*sm0-heff0          
+					bufm(:,:,tid) = (ee+c_i*delta*mag)*sm0-heff0
 					call matrixinv(bufm(:,:,tid),Ddim)
 					! sum grid data
-					bufn(:,:,tid) = bufn(:,:,tid)+bufm(:,:,tid)*(fermi(ee,Ef)*deii(i)*cdexp(c_i*ee*(tt/(hpa*10.0_R_KIND**12))))
+					bufn(:,:,tid) = bufn(:,:,tid)+bufm(:,:,tid)*(fermi(ee,Ef)*deii(i)*exp(c_i*ee*(tt/(hpa*10.0_R_KIND**12))))
 				end do
 				!$OMP END DO
 				!$OMP END PARALLEL
 				forall(i=1:Ddim,j=1:Ddim) Kbuf(i,j) = c_nil           ! collect data
 				do i = 1, ncpus
-					Kbuf = Kbuf+bufn(:,:,i) 
+					Kbuf = Kbuf+bufn(:,:,i)
 				end do
 			else if(diag_int==1) then
 				t_glb = tt/(hpa*10.0_R_KIND**12)
@@ -579,51 +614,84 @@ module integrand_fun
 				end do
 				! call integrand functions
 				forall(i=1:Ddim,j=1:Ddim) Kbuf(i,j) = c_nil
-				!$OMP PARALLEL DEFAULT(SHARED) PRIVATE(tid,resultr,resulti,abserr,neval,ier,ieri,last)
+				!$OMP PARALLEL DEFAULT(SHARED) PRIVATE(tid,resultr,resulti,abserr,neval,ier,ieri,last,sng_pnti,pp)
 				!$OMP DO
 				do i = 1, Ddim
 					tid = OMP_GET_THREAD_NUM()+1
 					zbufs(1,tid) = valt0(i,i)
-					call dqagpe(integrand2_re,elow,ehigh,ii+2,sng_pnts,0.001_R_KIND*delta,0.001_R_KIND*delta,nitgl,resultr, &
+					if( (real(zbufs(1,tid),kind=R_KIND)>=elow .and. real(zbufs(1,tid),kind=R_KIND)<=ehigh) .and. (aimag(zbufs(1,tid))>=elow .and. aimag(zbufs(1,tid))<=ehigh) ) then
+						pp=4
+						allocate(sng_pnti(pp))
+						sng_pnti(1)=real(zbufs(1,tid),kind=R_KIND)
+						sng_pnti(2)=aimag(zbufs(1,tid))
+					else if( (real(zbufs(1,tid),kind=R_KIND)>=elow .and. real(zbufs(1,tid),kind=R_KIND)<=ehigh) .and. (aimag(zbufs(1,tid))<elow .or. aimag(zbufs(1,tid))>ehigh) ) then
+						pp=3
+						allocate(sng_pnti(pp))
+						sng_pnti(1)=real(zbufs(1,tid),kind=R_KIND)
+					else if( (real(zbufs(1,tid),kind=R_KIND)<elow .or. real(zbufs(1,tid),kind=R_KIND)>ehigh) .and. (aimag(zbufs(1,tid))>=elow .and. aimag(zbufs(1,tid))<=ehigh) ) then
+						pp=3
+						allocate(sng_pnti(pp))
+						sng_pnti(1)=aimag(zbufs(1,tid))
+					else
+						pp=2
+						allocate(sng_pnti(pp))
+					end if
+					call dqagpe(integrand2_re,elow,ehigh,pp,sng_pnti,0.01_R_KIND*delta,0.01_R_KIND*delta,nitgl,resultr, &
 								& abserr,neval,ier,alist_m(:,tid),blist_m(:,tid),rlist_m(:,tid),elist_m(:,tid), &
 								& pts_m(:,tid),iord_m(:,tid),level_m(:,tid),ndin_m(:,tid),last)
-					call dqagpe(integrand2_im,elow,ehigh,ii+2,sng_pnts,0.001_R_KIND*delta,0.001_R_KIND*delta,nitgl,resulti, &
+					call dqagpe(integrand2_im,elow,ehigh,pp,sng_pnti,0.01_R_KIND*delta,0.01_R_KIND*delta,nitgl,resulti, &
 								& abserr,neval,ieri,alist_m(:,tid),blist_m(:,tid),rlist_m(:,tid),elist_m(:,tid), &
 								& pts_m(:,tid),iord_m(:,tid),level_m(:,tid),ndin_m(:,tid),last)
-					if(ier>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of rho_ini !", ier
-					if(ieri>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of rho_ini !", ieri
+					if(ier>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of RE-rho_ini 2!", ier
+					if(ieri>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of IM-rho_ini 2!", ieri
 					Kbuf(i,i) = c_one*resultr+c_i*resulti
+					deallocate(sng_pnti)
 				end do
 				!$OMP END DO
 				!$OMP END PARALLEL
 				deallocate(sng_pnts,ndin_m,pts_m)
-				buf1 = vect0
-				call matrixmul(buf2,buf1,Kbuf,Ddim)
-				call matrixinv(buf1,Ddim)
-				call matrixmul(Kbuf,buf2,buf1,Ddim)
+				forall(i=1:Ddim,j=1:Ddim) buf2(j,i) = vect0(j,i)*Kbuf(i,i)
+				call matrixmul(Kbuf,buf2,vect0inv,Ddim)
 			else if(diag_int==2) then
 				ttbuf = tt/(hpa*10.0_R_KIND**12)
+				ttbuf2 = ttbuf+c_i*fermi_apx
 				forall(i=1:Ddim,j=1:Ddim) Kbuf(i,j) = c_nil
-				!!$OMP PARALLEL DEFAULT(SHARED) PRIVATE(zbuf1,zbuf2)
-				!!$OMP DO
+				zbuf1a = exp(fermi_apx*(ehigh-ehigh_apx))
+				zbuf2a = exp(c_i*ttbuf*elow)
+				zbuf3a = exp(c_i*ttbuf*ehigh)
+				zbuf4a = exp(fermi_apx*ehigh)
+				!$OMP PARALLEL DEFAULT(SHARED) PRIVATE(zbuf1,zbuf2,zbuf3,zbuf4,zbuf5)
+				!$OMP DO
 				do i = 1, Ddim
 					zbuf1 = ehigh-valt0(i,i)
 					zbuf2 = elow-valt0(i,i)
-					if(ttbuf>0.0_R_KIND) then
-						Kbuf(i,i) = cdig(c_nil,-c_i*zbuf2*ttbuf)-cdig(c_nil,-c_i*zbuf1*ttbuf)+ &
-									& cdlog(-c_i*zbuf2*ttbuf)-cdlog(-c_i*zbuf1*ttbuf)+cdlog(zbuf1)-cdlog(zbuf2)
-						Kbuf(i,i) = Kbuf(i,i)*cdexp(c_i*(valt0(i,i))*ttbuf)
+					zbuf3 = ehigh_apx-valt0(i,i)
+					if(n>0) then
+						zbuf5 = ( log(-c_i*zbuf1*ttbuf2)-log(-c_i*zbuf3*ttbuf2)+log(zbuf3)-log(zbuf1) )
+						if(abs(aimag(zbuf5))>5.0e-15) then
+							zbuf4 = exp(c_i*(valt0(i,i))*ttbuf2)*zbuf4a*zbuf5
+						else
+							zbuf4 = c_nil
+						end if
+						zbuf4 = zbuf4+ zbuf3a*cdig_fun(c_nil,-c_i*zbuf1*ttbuf2)-zbuf3a*zbuf1a*cdig_fun(c_nil,-c_i*zbuf3*ttbuf2)
+
+						zbuf5 = ( log(-c_i*zbuf2*ttbuf)-log(-c_i*zbuf1*ttbuf)+log(zbuf1)-log(zbuf2) )
+						if(abs(aimag(zbuf5))>5.0e-15) then
+							Kbuf(i,i) = exp(c_i*(valt0(i,i))*ttbuf)*zbuf5
+						else
+							Kbuf(i,i) = c_nil
+						end if
+						Kbuf(i,i) = Kbuf(i,i)+zbuf2a*cdig_fun(c_nil,-c_i*zbuf2*ttbuf)-zbuf3a*cdig_fun(c_nil,-c_i*zbuf1*ttbuf)
+
+						Kbuf(i,i) = Kbuf(i,i)+zbuf4
 					else
-						Kbuf(i,i) = cdlog(zbuf1)-cdlog(zbuf2)
-						Kbuf(i,i) = Kbuf(i,i)*cdexp(c_i*(valt0(i,i))*ttbuf)
+						Kbuf(i,i) = log(zbuf1)-log(zbuf2)+( cdig_fun(c_nil,fermi_apx*zbuf1)-zbuf1a*cdig_fun(c_nil,fermi_apx*zbuf3) )
 					end if
 				end do
-				!!$OMP END DO
-				!!$OMP END PARALLEL
-				buf1 = vect0
-				call matrixmul(buf2,buf1,Kbuf,Ddim)
-				call matrixinv(buf1,Ddim)
-				call matrixmul(Kbuf,buf2,buf1,Ddim)
+				!$OMP END DO
+				!$OMP END PARALLEL
+				forall(i=1:Ddim,j=1:Ddim) buf2(j,i) = vect0(j,i)*Kbuf(i,i)
+				call matrixmul(Kbuf,buf2,vect0inv,Ddim)
 			end if
 			call matrixmul(buf1,Kbuf,GF%GaL,Ddim)                     ! KL1 for L electrode
 			call matrixmul(buf2,UL,buf1,Ddim)
@@ -633,22 +701,22 @@ module integrand_fun
 			KR1 = buf2*(-2.0_R_KIND*c_i/pi)
 			! ========== integration for KL2 and KR2 ==========
 			if(diag_int==0) then
-				forall(i=1:GF%Ddim,j=1:GF%Ddim,k=1:ncpus) bufn(i,j,k) = c_nil 
-				forall(i=1:GF%Ddim,j=1:GF%Ddim,k=1:ncpus) bufn2(i,j,k) = c_nil 
+				forall(i=1:GF%Ddim,j=1:GF%Ddim,k=1:ncpus) bufn(i,j,k) = c_nil
+				forall(i=1:GF%Ddim,j=1:GF%Ddim,k=1:ncpus) bufn2(i,j,k) = c_nil
 				!$OMP PARALLEL DEFAULT(SHARED) PRIVATE(ee,tid)
 				!$OMP DO
 				do i = 1, ne
 					tid = OMP_GET_THREAD_NUM()+1
 					! calculate retarded green function
 					ee = eii(i)
-					bufq(:,:,tid) = (ee+c_i*delta*mag)*sm-heff          
+					bufq(:,:,tid) = (ee+c_i*delta*mag)*sm-heff
 					call matrixinv(bufq(:,:,tid),Ddim)
 					! for KL2
-					bufp(:,:,tid) = idty-UL*cdexp(c_i*(ee+0.0*VL)*(tt/(hpa*10.0_R_KIND**12)))
+					bufp(:,:,tid) = idty-UL*exp(c_i*(ee+0.0*VL)*(tt/(hpa*10.0_R_KIND**12)))
 					call matrixmul(bufm(:,:,tid),bufp(:,:,tid),bufq(:,:,tid),Ddim)
 					bufn(:,:,tid) = bufn(:,:,tid)+bufm(:,:,tid)*(fermi(ee+0.0*VL,Ef)*deii(i))
 					! for KR2
-					bufp(:,:,tid) = idty-UR*cdexp(c_i*(ee+0.0*VR)*(tt/(hpa*10.0_R_KIND**12)))
+					bufp(:,:,tid) = idty-UR*exp(c_i*(ee+0.0*VR)*(tt/(hpa*10.0_R_KIND**12)))
 					call matrixmul(bufm(:,:,tid),bufp(:,:,tid),bufq(:,:,tid),Ddim)
 					bufn2(:,:,tid) = bufn2(:,:,tid)+bufm(:,:,tid)*(fermi(ee+0.0*VR,Ef)*deii(i))
 				end do
@@ -657,14 +725,14 @@ module integrand_fun
 				! sum for KL2
 				forall(i=1:Ddim,j=1:Ddim) Kbuf(i,j) = c_nil               ! collect data
 				do i = 1, ncpus
-					Kbuf = Kbuf+bufn(:,:,i) 
+					Kbuf = Kbuf+bufn(:,:,i)
 				end do
 				call matrixmul(buf1,Kbuf,GF%GaL,Ddim)
 				KL2 = buf1*(-2.0_R_KIND*c_i/pi)
 				! sum for KR2
 				forall(i=1:Ddim,j=1:Ddim) Kbuf(i,j) = c_nil               ! collect data
 				do i = 1, ncpus
-					Kbuf = Kbuf+bufn2(:,:,i) 
+					Kbuf = Kbuf+bufn2(:,:,i)
 				end do
 				call matrixmul(buf1,Kbuf,GF%GaR,Ddim)
 				KR2 = buf1*(-2.0_R_KIND*c_i/pi)
@@ -686,42 +754,57 @@ module integrand_fun
 				! call integrand functions
 				forall(i=1:Ddim,j=1:Ddim) Kbuf(i,j) = c_nil
 				forall(i=1:Ddim,j=1:Ddim) Kbuft(i,j) = c_nil
-				!$OMP PARALLEL DEFAULT(SHARED) PRIVATE(tid,resultr,resulti,abserr,neval,ier,ieri,last)
+				!$OMP PARALLEL DEFAULT(SHARED) PRIVATE(tid,resultr,resulti,abserr,neval,ier,ieri,last,sng_pnti,pp)
 				!$OMP DO
 				do i = 1, Ddim
 					tid = OMP_GET_THREAD_NUM()+1
 					zbufs(1,tid) = valt0(i,i)
-					call dqagpe(integrand1_re,elow,ehigh,ii+2,sng_pnts,0.001_R_KIND*delta,0.001_R_KIND*delta,nitgl,resultr, &
+					if( (real(zbufs(1,tid),kind=R_KIND)>=elow .and. real(zbufs(1,tid),kind=R_KIND)<=ehigh) .and. (aimag(zbufs(1,tid))>=elow .and. aimag(zbufs(1,tid))<=ehigh) ) then
+						pp=4
+						allocate(sng_pnti(pp))
+						sng_pnti(1)=real(zbufs(1,tid),kind=R_KIND)
+						sng_pnti(2)=aimag(zbufs(1,tid))
+					else if( (real(zbufs(1,tid),kind=R_KIND)>=elow .and. real(zbufs(1,tid),kind=R_KIND)<=ehigh) .and. (aimag(zbufs(1,tid))<elow .or. aimag(zbufs(1,tid))>ehigh) ) then
+						pp=3
+						allocate(sng_pnti(pp))
+						sng_pnti(1)=real(zbufs(1,tid),kind=R_KIND)
+					else if( (real(zbufs(1,tid),kind=R_KIND)<elow .or. real(zbufs(1,tid),kind=R_KIND)>ehigh) .and. (aimag(zbufs(1,tid))>=elow .and. aimag(zbufs(1,tid))<=ehigh) ) then
+						pp=3
+						allocate(sng_pnti(pp))
+						sng_pnti(1)=aimag(zbufs(1,tid))
+					else
+						pp=2
+						allocate(sng_pnti(pp))
+					end if
+					call dqagpe(integrand1_re,elow,ehigh,pp,sng_pnti,0.01_R_KIND*delta,0.01_R_KIND*delta,nitgl,resultr, &
 								& abserr,neval,ier,alist_m(:,tid),blist_m(:,tid),rlist_m(:,tid),elist_m(:,tid), &
 								& pts_m(:,tid),iord_m(:,tid),level_m(:,tid),ndin_m(:,tid),last)
-					call dqagpe(integrand1_im,elow,ehigh,ii+2,sng_pnts,0.001_R_KIND*delta,0.001_R_KIND*delta,nitgl,resulti, &
+					call dqagpe(integrand1_im,elow,ehigh,pp,sng_pnti,0.01_R_KIND*delta,0.01_R_KIND*delta,nitgl,resulti, &
 								& abserr,neval,ieri,alist_m(:,tid),blist_m(:,tid),rlist_m(:,tid),elist_m(:,tid), &
 								& pts_m(:,tid),iord_m(:,tid),level_m(:,tid),ndin_m(:,tid),last)
-					if(ier>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of rho_ini !", ier
-					if(ieri>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of rho_ini !", ieri
+					if(ier>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of RE-rho_ini 3!", ier
+					if(ieri>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of IM-rho_ini 3!", ieri
 					Kbuf(i,i) = c_one*resultr+c_i*resulti
-					call dqagpe(integrand2_re,elow,ehigh,ii+2,sng_pnts,0.001_R_KIND*delta,0.001_R_KIND*delta,nitgl,resultr, &
+					call dqagpe(integrand2_re,elow,ehigh,pp,sng_pnti,0.01_R_KIND*delta,0.01_R_KIND*delta,nitgl,resultr, &
 								& abserr,neval,ier,alist_m(:,tid),blist_m(:,tid),rlist_m(:,tid),elist_m(:,tid), &
 								& pts_m(:,tid),iord_m(:,tid),level_m(:,tid),ndin_m(:,tid),last)
-					call dqagpe(integrand2_im,elow,ehigh,ii+2,sng_pnts,0.001_R_KIND*delta,0.001_R_KIND*delta,nitgl,resulti, &
+					call dqagpe(integrand2_im,elow,ehigh,pp,sng_pnti,0.01_R_KIND*delta,0.01_R_KIND*delta,nitgl,resulti, &
 								& abserr,neval,ieri,alist_m(:,tid),blist_m(:,tid),rlist_m(:,tid),elist_m(:,tid), &
 								& pts_m(:,tid),iord_m(:,tid),level_m(:,tid),ndin_m(:,tid),last)
-					if(ier>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of rho_ini !", ier
-					if(ieri>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of rho_ini !", ieri
+					if(ier>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of RE-rho_ini 4!", ier
+					if(ieri>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of IM-rho_ini 4!", ieri
 					Kbuft(i,i) = c_one*resultr+c_i*resulti
+					deallocate(sng_pnti)
 				end do
 				!$OMP END DO
 				!$OMP END PARALLEL
 				deallocate(sng_pnts,ndin_m,pts_m)
-				buf1 = vect0
-				buf3 = vect0
-				call matrixinv(buf3,Ddim)
 				! non-exp(t) term
-				call matrixmul(buf2,Kbuf,buf3,Ddim)
-				call matrixmul(Kbuf,buf1,buf2,Ddim)
+				forall(i=1:Ddim,j=1:Ddim) buf2(j,i) = vect0(j,i)*Kbuf(i,i)
+				call matrixmul(Kbuf,buf2,vect0inv,Ddim)
 				! exp(t) term
-				call matrixmul(buf2,Kbuft,buf3,Ddim)
-				call matrixmul(Kbuft,buf1,buf2,Ddim)
+				forall(i=1:Ddim,j=1:Ddim) buf2(j,i) = vect0(j,i)*Kbuft(i,i)
+				call matrixmul(Kbuft,buf2,vect0inv,Ddim)
 				! sum for KL2
 				call matrixmul(buf1,UL,Kbuft,Ddim)
 				buf1 = Kbuf-buf1
@@ -734,36 +817,53 @@ module integrand_fun
 				KR2 = KR2*(-2.0_R_KIND*c_i/pi)
 			else if(diag_int==2) then
 				ttbuf = tt/(hpa*10.0_R_KIND**12)
+				ttbuf2 = ttbuf+c_i*fermi_apx
 				forall(i=1:Ddim,j=1:Ddim) Kbuf(i,j) = c_nil
 				forall(i=1:Ddim,j=1:Ddim) Kbuft(i,j) = c_nil
-				!!$OMP PARALLEL DEFAULT(SHARED) PRIVATE(zbuf1,zbuf2)
-				!!$OMP DO
+				zbuf1a = exp(fermi_apx*(ehigh-ehigh_apx))
+				zbuf2a = exp(c_i*ttbuf*elow)
+				zbuf3a = exp(c_i*ttbuf*ehigh)
+				zbuf4a = exp(fermi_apx*ehigh)
+				!$OMP PARALLEL DEFAULT(SHARED) PRIVATE(zbuf1,zbuf2,zbuf3,zbuf4,zbuf5)
+				!$OMP DO
 				do i = 1, Ddim
 					zbuf1 = ehigh-valt0(i,i)
 					zbuf2 = elow-valt0(i,i)
+					zbuf3 = ehigh_apx-valt0(i,i)
 					! non-exp(t) term
-					Kbuf(i,i) = cdlog(zbuf1)-cdlog(zbuf2)
+					Kbuf(i,i) = log(zbuf1)-log(zbuf2)+( cdig_fun(c_nil,fermi_apx*zbuf1)-zbuf1a*cdig_fun(c_nil,fermi_apx*zbuf3) )
+
 					! exp(t) term
-					if(ttbuf>0.0_R_KIND) then
-						Kbuft(i,i) = cdig(c_nil,-c_i*zbuf2*ttbuf)-cdig(c_nil,-c_i*zbuf1*ttbuf)+ &
-									& cdlog(-c_i*zbuf2*ttbuf)-cdlog(-c_i*zbuf1*ttbuf)+cdlog(zbuf1)-cdlog(zbuf2)
-						Kbuft(i,i) = Kbuft(i,i)*cdexp(c_i*(valt0(i,i))*ttbuf)
+					if(n>0) then
+						zbuf5 = ( log(-c_i*zbuf1*ttbuf2)-log(-c_i*zbuf3*ttbuf2)+log(zbuf3)-log(zbuf1) )
+						if(abs(aimag(zbuf5))>5.0e-15) then
+							zbuf4 = exp(c_i*(valt0(i,i))*ttbuf2)*zbuf4a*zbuf5
+						else
+							zbuf4 = c_nil
+						end if
+						zbuf4 = zbuf4+zbuf3a*cdig_fun(c_nil,-c_i*zbuf1*ttbuf2)-zbuf3a*zbuf1a*cdig_fun(c_nil,-c_i*zbuf3*ttbuf2)
+
+						zbuf5 = (log(-c_i*zbuf2*ttbuf)-log(-c_i*zbuf1*ttbuf)+log(zbuf1)-log(zbuf2))
+						if(abs(aimag(zbuf5))>5.0e-15) then
+							Kbuft(i,i) = exp(c_i*(valt0(i,i))*ttbuf)*zbuf5
+						else
+							Kbuft(i,i) = c_nil
+						end if
+						Kbuft(i,i) = Kbuft(i,i)+zbuf2a*cdig_fun(c_nil,-c_i*zbuf2*ttbuf)-zbuf3a*cdig_fun(c_nil,-c_i*zbuf1*ttbuf)
+
+						Kbuft(i,i) = Kbuft(i,i)+zbuf4
 					else
-						Kbuft(i,i) = cdlog(zbuf1)-cdlog(zbuf2)
-						Kbuft(i,i) = Kbuft(i,i)*cdexp(c_i*(valt0(i,i))*ttbuf)
+						Kbuft(i,i) = Kbuf(i,i)
 					end if
 				end do
-				!!$OMP END DO
-				!!$OMP END PARALLEL
-				buf1 = vect0
-				buf3 = vect0
-				call matrixinv(buf3,Ddim)
+				!$OMP END DO
+				!$OMP END PARALLEL
 				! non-exp(t) term
-				call matrixmul(buf2,Kbuf,buf3,Ddim)
-				call matrixmul(Kbuf,buf1,buf2,Ddim)
+				forall(i=1:Ddim,j=1:Ddim) buf2(j,i) = vect0(j,i)*Kbuf(i,i)
+				call matrixmul(Kbuf,buf2,vect0inv,Ddim)
 				! exp(t) term
-				call matrixmul(buf2,Kbuft,buf3,Ddim)
-				call matrixmul(Kbuft,buf1,buf2,Ddim)
+				forall(i=1:Ddim,j=1:Ddim) buf2(j,i) = vect0(j,i)*Kbuft(i,i)
+				call matrixmul(Kbuft,buf2,vect0inv,Ddim)
 				! sum for KL2
 				call matrixmul(buf1,UL,Kbuft,Ddim)
 				buf1 = Kbuf-buf1
@@ -779,7 +879,7 @@ module integrand_fun
 			GF%KL = KL1+KL2+dconjg(transpose(KL1+KL2))
 			GF%KR = KR1+KR2+dconjg(transpose(KR1+KR2))
 		end if
-		
+
 		! calculate QL/QR, no QN for intial state
 		GF%QL = GF%KL                                                 ! QL term
 		call matrixmul(buf1,GF%LaL,GF%rho,Ddim)
@@ -800,7 +900,7 @@ module integrand_fun
 		IR = real(ctrace(Ddim, GF%QR), kind=R_KIND)*e_over_hpa_pi*pi
 		IN = nil
 		write(113,'(I9,A,F20.15,A,F20.15,A,F20.15,A,F20.15,A,F20.9)') n, tab, tt, tab, IL, tab, IR, tab, IN, tab, real(ctrace(Ddim,GF%rho), kind=R_KIND)
-		
+
 		! update rho
 		GF%Q = GF%QL+GF%QR
 		call matrixmul(buf1,GF%Hi,GF%rho,Ddim)
@@ -813,7 +913,7 @@ module integrand_fun
 			else if(DForder==2) then
 				GF%rho = bufold1*(4.0_R_KIND/3.0_R_KIND)-bufold2*(1.0_R_KIND/3.0_R_KIND)+ &
 						& buf1*(2.0_R_KIND/3.0_R_KIND)*(dt/(hpa*10.0_R_KIND**12))
-			else if(DForder==3) then                                           
+			else if(DForder==3) then
 				GF%rho = bufold1*(18.0_R_KIND/11.0_R_KIND)-bufold2*(9.0_R_KIND/11.0_R_KIND)+ &
 						& bufold3*(2.0_R_KIND/11.0_R_KIND)+buf1*(6.0_R_KIND/11.0_R_KIND)*(dt/(hpa*10.0_R_KIND**12))
 			else if(DForder==4 .or. DForder==5) then
@@ -832,7 +932,7 @@ module integrand_fun
 				buf3 = buf1
 			else if(DForder==2) then
 				buf3 = buf1*(1.5_R_KIND)-bufold1*(0.5_R_KIND)
-			else if(DForder==3) then                                           
+			else if(DForder==3) then
 				buf3 = buf1*(23.0_R_KIND/12.0_R_KIND)-bufold1*(16.0_R_KIND/12.0_R_KIND)+ &
 						& bufold2*(5.0_R_KIND/12.0_R_KIND)
 			else if(DForder==4) then
@@ -851,18 +951,18 @@ module integrand_fun
 			bufold1 = buf1
 			GF%rho = GF%rho+buf3*(dt/(hpa*10.0_R_KIND**12))
 		end if
-			
+
 		! show message
 		write(*,'(A37,F7.3,A2,A,\)') "equilibrate initial charge density: ",100.0_R_KIND*n/ntstep_pre," %",creturn
 	end do
 	close(113)
 	write(*,*) ""
-	
-	
+
+
 	! export initial charge density for next usage
 	fpath = trim(fout) // "rhoini.txt"
 	open(UNIT=99, FILE=trim(fpath), STATUS="REPLACE", IOSTAT=ierr)
-	if(ierr /= 0) stop "integrand_fun: openning rhoini.txt in default path is error!"	
+	if(ierr /= 0) stop "integrand_fun: openning rhoini.txt in default path is error!"
 	write(99,*) Ddim
 	do i = 1, Ddim
 		do j = 1, Ddim
@@ -870,8 +970,8 @@ module integrand_fun
 		end do
 	end do
 	close(99)
-	
-	
+
+
 	! initialize the index/exponent of the propagator factor
 	forall(i=1:Ddim,j=1:Ddim) GF%ULi(i,j)=c_nil
 	forall(i=1:Ddim,j=1:Ddim) GF%URi(i,j)=c_nil
@@ -879,22 +979,22 @@ module integrand_fun
 	! time-loops
 	fpath = trim(fout) // "time-current.txt"
 	open(UNIT=112, FILE=trim(fpath), STATUS="REPLACE", IOSTAT=ierr)
-	if(ierr /= 0) stop "integrand_fun: openning time-current.txt in default path is error!"	
+	if(ierr /= 0) stop "integrand_fun: openning time-current.txt in default path is error!"
 	close(112)
-    fpath = trim(fout) // "orbital_rho.txt"
+	fpath = trim(fout) // "orbital_rho.txt"
 	open(UNIT=113, FILE=trim(fpath), STATUS="REPLACE", IOSTAT=ierr)
-	if(ierr /= 0) stop "integrand_fun: openning orbital_rho.txt in default path is error!"	
+	if(ierr /= 0) stop "integrand_fun: openning orbital_rho.txt in default path is error!"
 	close(113)
-    ! record rhot0
-    k=0
-    do i=1,size(GF%ccinv,1)
-        GF%rhot0(i) = 0.0
-        do j=1,GF%numorb(i)
-            k=k+1
-            GF%rhot0(i)=GF%rhot0(i)+real(GF%rho(k,k))
-        end do
-    end do
-    
+	! record rhot0
+	k=0
+	do i=1,size(GF%ccinv,1)
+		GF%rhot0(i) = 0.0
+		do j=1,GF%numorb(i)
+			k=k+1
+			GF%rhot0(i)=GF%rhot0(i)+real(GF%rho(k,k))
+		end do
+	end do
+
 	sm0 = GF%SD
 	GF%Hi = GF%HD
 	GF%Si = GF%SD
@@ -912,6 +1012,7 @@ module integrand_fun
 	end if
 	updateK = .true.
 	dt = dt_std
+	CALL CPU_TIME(timeold)
 	do n = 0, ntstep
 		! read hamiltonian/overlap
 		if( (TdHS==.true.) .and. (cv_model==.false.) ) then
@@ -944,8 +1045,8 @@ module integrand_fun
 			GF%Hi = Hnow
 			GF%Si = Snow
 			GF%Si_rcd = Snow_rcd
-        else if( (TdHS==.true.) .and. (cv_model==.true.) ) then
-            if(n==0) then
+		else if( (TdHS==.true.) .and. (cv_model==.true.) ) then
+			if(n==0) then
 				smold = GF%SD_rcd
 				! read on time h/s matrix
 				call  inputHSt_cv(GF,GF%Ddim,n,orthbol)
@@ -986,7 +1087,7 @@ module integrand_fun
 			smold = GF%SD_rcd
 			heff0 = GF%HD
 		end if
-		
+
 		rhobak = GF%rho
 		! ! =============== begin Runge–Kutta methods ================
 		do u = 1, 4
@@ -1078,6 +1179,8 @@ module integrand_fun
 				smbuf = sm
 				call generalized_eigenvalues(heffbuf, smbuf, eval, buf1, buf2, Ddim)! Note! heffbuf/smbuf are overwritten on exit
 				vect = buf2
+				vectinv = vect
+				call matrixinv(vectinv,Ddim)
 				forall(i=1:Ddim,j=1:Ddim) valt(i,j) = c_nil
 				forall(i=1:Ddim) valt(i,i) = eval(i)
 				do i = 1, Ddim-1                                          ! sorting eigenvalue by real part
@@ -1089,6 +1192,7 @@ module integrand_fun
 						end if
 					end do
 				end do
+				elowt = real(eval(1),kind=R_KIND) - abs(Vb) - abs(VLac) - abs(VRac) - thermaleng
 				kpnt = 0                                                  ! find eigenvalue within selected energy range
 				do i = 1, Ddim
 					if(real(eval(i),kind=R_KIND)>(elow-dee) .and. real(eval(i),kind=R_KIND)<(ehigh+dee)) kpnt = kpnt+1
@@ -1107,7 +1211,7 @@ module integrand_fun
 					points(1:kpnt) = eiibuf
 					deallocate(eiibuf)
 					! decide energy grid by math library
-					Hglb = GF%Hi+GF%SEL+GF%SER-c_i*GF%GaN                 
+					Hglb = GF%Hi+GF%SEL+GF%SER-c_i*GF%GaN
 					Sglb = GF%Si
 					call dqagpe(syst,elow,ehigh,npts,points,100.0_R_KIND*delta,100.0_R_KIND*delta,nitgl,resultr, &
 								& abserr,neval,ier,alist,blist,rlist,elist,pts,iord,level,ndin,last)
@@ -1138,7 +1242,7 @@ module integrand_fun
 					! export default energy grid
 					fpath = trim(fout) // "energy_grid_t.txt"
 					open(UNIT=199, FILE=trim(fpath), STATUS="REPLACE", IOSTAT=ierr)
-					if(ierr /= 0) stop "integrand_fun: openning energy_grid_t.txt in default path is error!"	
+					if(ierr /= 0) stop "integrand_fun: openning energy_grid_t.txt in default path is error!"
 					do i = 1, last
 						write(199,'(I5,A,F20.15,A,F20.15,A,F20.15,A,I3)') i, tab, alist(i), tab, blist(i), tab, rlist(i), tab, level(i)
 					end do
@@ -1161,13 +1265,13 @@ module integrand_fun
 							do m = 1, GLpnt
 								k = k+1
 								eiit(k) = glx(m)*(rb-ra)/2.0_R_KIND+(ra+rb)/2.0_R_KIND
-								deiit(k) = glw(m)*(rb-ra)/2.0_R_KIND 
+								deiit(k) = glw(m)*(rb-ra)/2.0_R_KIND
 							end do
 						end do
 					end do
 					deallocate(points,pts,ndin)
 				else if (TdHS .and. (.not. t_intgl_search) .and. n>0 .and. diag_int==0) then
-					net = kpnt                                            ! add energy grids 
+					net = kpnt                                            ! add energy grids
 					do i = 1, kpnt-1
 						db1 = eiibuf(i+1)-eiibuf(i)
 						if(db1>dee) net = net+aint(db1/dee)
@@ -1185,7 +1289,7 @@ module integrand_fun
 								do m = 1, GLpnt
 									k = k+1
 									eiit(k) = glx(m)*(rb-ra)/2.0_R_KIND+(ra+rb)/2.0_R_KIND
-									deiit(k) = glw(m)*(rb-ra)/2.0_R_KIND 
+									deiit(k) = glw(m)*(rb-ra)/2.0_R_KIND
 								end do
 								ra = rb
 							end do
@@ -1194,7 +1298,7 @@ module integrand_fun
 							do m = 1, GLpnt
 								k = k+1
 								eiit(k) = glx(m)*(rb-ra)/2.0_R_KIND+(ra+rb)/2.0_R_KIND
-								deiit(k) = glw(m)*(rb-ra)/2.0_R_KIND 
+								deiit(k) = glw(m)*(rb-ra)/2.0_R_KIND
 							end do
 							ra = rb
 						end if
@@ -1203,7 +1307,7 @@ module integrand_fun
 					deallocate(eiibuf)
 					deallocate(pts,ndin,points)
 				else if ( ((.not. TdHS) .or. n==0) .and. diag_int==0) then
-					net = ne                                              ! add energy grids 
+					net = ne                                              ! add energy grids
 					k = net
 					allocate(eiit(net),deiit(net))
 					eiit = eii
@@ -1212,16 +1316,16 @@ module integrand_fun
 					deallocate(pts,ndin,points)
 				end if
 				if(diag_int>0) deallocate(eiibuf,pts,ndin,points)
-				
+
 				if(diag_int==0) then
 					! export assigned energy grid
 					fpath	 = trim(fout) // "energy_grid__t_subdivision.txt"
 					open(UNIT=19, FILE=trim(fpath), STATUS="REPLACE", IOSTAT=ierr)
-					if(ierr /= 0) stop "integrand_fun: openning energy_grid__t_subdivision in default path is error!"	
+					if(ierr /= 0) stop "integrand_fun: openning energy_grid__t_subdivision in default path is error!"
 					do i = 1, net
 						write(19,'(I5,A,F20.15,A,F20.15)') i, tab, eiit(i), tab, deiit(i)
 					end do
-					close(19)	
+					close(19)
 					if(k/=net) stop "integrand_fun: error 4 on generating assigned energy grid for integration of t!"
 				else
 					fpath	 = trim(fout) // "energy_grid__t_subdivision.txt"
@@ -1230,27 +1334,27 @@ module integrand_fun
 					close(19)
 				end if
 
-				
+
 				! calculate K term
 				! ========== general integration for K1 ==========
 				if(diag_int==0) then
-					forall(i=1:GF%Ddim,j=1:GF%Ddim,k=1:ncpus) bufn(i,j,k) = c_nil 
+					forall(i=1:GF%Ddim,j=1:GF%Ddim,k=1:ncpus) bufn(i,j,k) = c_nil
 					!$OMP PARALLEL DEFAULT(SHARED) PRIVATE(ee,tid)
 					!$OMP DO
 					do i = 1, ne
 						tid = OMP_GET_THREAD_NUM()+1
 						! calculate retarded green function
 						ee = eii(i)
-						bufm(:,:,tid) = (ee+c_i*delta*mag)*sm0-heff0          
+						bufm(:,:,tid) = (ee+c_i*delta*mag)*sm0-heff0
 						call matrixinv(bufm(:,:,tid),Ddim)
 						! sum grid data
-						bufn(:,:,tid) = bufn(:,:,tid)+bufm(:,:,tid)*(fermi(ee,Ef)*deii(i)*cdexp(c_i*ee*(tt/(hpa*10.0_R_KIND**12))))
+						bufn(:,:,tid) = bufn(:,:,tid)+bufm(:,:,tid)*(fermi(ee,Ef)*deii(i)*exp(c_i*ee*(tt/(hpa*10.0_R_KIND**12))))
 					end do
 					!$OMP END DO
 					!$OMP END PARALLEL
 					forall(i=1:Ddim,j=1:Ddim) Kbuf(i,j) = c_nil                   ! collect data
 					do i = 1, ncpus
-						Kbuf = Kbuf+bufn(:,:,i) 
+						Kbuf = Kbuf+bufn(:,:,i)
 					end do
 				else if(diag_int==1) then
 					t_glb = tt/(hpa*10.0_R_KIND**12)
@@ -1269,51 +1373,84 @@ module integrand_fun
 					end do
 					! call integrand functions
 					forall(i=1:Ddim,j=1:Ddim) Kbuf(i,j) = c_nil
-					!$OMP PARALLEL DEFAULT(SHARED) PRIVATE(tid,resultr,resulti,abserr,neval,ier,ieri,last)
+					!$OMP PARALLEL DEFAULT(SHARED) PRIVATE(tid,resultr,resulti,abserr,neval,ier,ieri,last,sng_pnti,pp)
 					!$OMP DO
 					do i = 1, Ddim
 						tid = OMP_GET_THREAD_NUM()+1
 						zbufs(1,tid) = valt0(i,i)
-						call dqagpe(integrand2_re,elow,ehigh,ii+2,sng_pnts,0.001_R_KIND*delta,0.001_R_KIND*delta,nitgl,resultr, &
+						if( (real(zbufs(1,tid),kind=R_KIND)>=elow .and. real(zbufs(1,tid),kind=R_KIND)<=ehigh) .and. (aimag(zbufs(1,tid))>=elow .and. aimag(zbufs(1,tid))<=ehigh) ) then
+							pp=4
+							allocate(sng_pnti(pp))
+							sng_pnti(1)=real(zbufs(1,tid),kind=R_KIND)
+							sng_pnti(2)=aimag(zbufs(1,tid))
+						else if( (real(zbufs(1,tid),kind=R_KIND)>=elow .and. real(zbufs(1,tid),kind=R_KIND)<=ehigh) .and. (aimag(zbufs(1,tid))<elow .or. aimag(zbufs(1,tid))>ehigh) ) then
+							pp=3
+							allocate(sng_pnti(pp))
+							sng_pnti(1)=real(zbufs(1,tid),kind=R_KIND)
+						else if( (real(zbufs(1,tid),kind=R_KIND)<elow .or. real(zbufs(1,tid),kind=R_KIND)>ehigh) .and. (aimag(zbufs(1,tid))>=elow .and. aimag(zbufs(1,tid))<=ehigh) ) then
+							pp=3
+							allocate(sng_pnti(pp))
+							sng_pnti(1)=aimag(zbufs(1,tid))
+						else
+							pp=2
+							allocate(sng_pnti(pp))
+						end if
+						call dqagpe(integrand2_re,elow,ehigh,pp,sng_pnti,0.01_R_KIND*delta,0.01_R_KIND*delta,nitgl,resultr, &
 									& abserr,neval,ier,alist_m(:,tid),blist_m(:,tid),rlist_m(:,tid),elist_m(:,tid), &
 									& pts_m(:,tid),iord_m(:,tid),level_m(:,tid),ndin_m(:,tid),last)
-						call dqagpe(integrand2_im,elow,ehigh,ii+2,sng_pnts,0.001_R_KIND*delta,0.001_R_KIND*delta,nitgl,resulti, &
+						call dqagpe(integrand2_im,elow,ehigh,pp,sng_pnti,0.01_R_KIND*delta,0.01_R_KIND*delta,nitgl,resulti, &
 									& abserr,neval,ieri,alist_m(:,tid),blist_m(:,tid),rlist_m(:,tid),elist_m(:,tid), &
 									& pts_m(:,tid),iord_m(:,tid),level_m(:,tid),ndin_m(:,tid),last)
-						if(ier>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of rho_ini !", ier
-						if(ieri>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of rho_ini !", ieri
+						if(ier>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of RE-rho_ini 5!", ier
+						if(ieri>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of IM-rho_ini 5!", ieri
 						Kbuf(i,i) = c_one*resultr+c_i*resulti
+						deallocate(sng_pnti)
 					end do
 					!$OMP END DO
 					!$OMP END PARALLEL
 					deallocate(sng_pnts,ndin_m,pts_m)
-					buf1 = vect0
-					call matrixmul(buf2,buf1,Kbuf,Ddim)
-					call matrixinv(buf1,Ddim)
-					call matrixmul(Kbuf,buf2,buf1,Ddim)
+					forall(i=1:Ddim,j=1:Ddim) buf2(j,i) = vect0(j,i)*Kbuf(i,i)
+					call matrixmul(Kbuf,buf2,vect0inv,Ddim)
 				else if(diag_int==2) then
 					ttbuf = tt/(hpa*10.0_R_KIND**12)
+					ttbuf2 = ttbuf+c_i*fermi_apx
 					forall(i=1:Ddim,j=1:Ddim) Kbuf(i,j) = c_nil
-					!!$OMP PARALLEL DEFAULT(SHARED) PRIVATE(zbuf1,zbuf2)
-					!!$OMP DO
+					zbuf1a = exp(fermi_apx*(ehigh-ehigh_apx))
+					zbuf2a = exp(c_i*ttbuf*elow)
+					zbuf3a = exp(c_i*ttbuf*ehigh)
+					zbuf4a = exp(fermi_apx*ehigh)
+					!$OMP PARALLEL DEFAULT(SHARED) PRIVATE(zbuf1,zbuf2,zbuf3,zbuf4,zbuf5)
+					!$OMP DO
 					do i = 1, Ddim
 						zbuf1 = ehigh-valt0(i,i)
 						zbuf2 = elow-valt0(i,i)
-						if(ttbuf>0.0_R_KIND) then
-							Kbuf(i,i) = cdig(c_nil,-c_i*zbuf2*ttbuf)-cdig(c_nil,-c_i*zbuf1*ttbuf)+ &
-										& cdlog(-c_i*zbuf2*ttbuf)-cdlog(-c_i*zbuf1*ttbuf)+cdlog(zbuf1)-cdlog(zbuf2)
-							Kbuf(i,i) = Kbuf(i,i)*cdexp(c_i*(valt0(i,i))*ttbuf)
+						zbuf3 = ehigh_apx-valt0(i,i)
+						if(n>0 .or. u>1) then
+							zbuf5 = ( log(-c_i*zbuf1*ttbuf2)-log(-c_i*zbuf3*ttbuf2)+log(zbuf3)-log(zbuf1))
+							if(abs(aimag(zbuf5))>5.0e-15) then
+								zbuf4 = exp(c_i*(valt0(i,i))*ttbuf2)*zbuf4a*zbuf5
+							else
+								zbuf4 = c_nil
+							end if
+						    zbuf4 = zbuf4+zbuf3a*cdig_fun(c_nil,-c_i*zbuf1*ttbuf2)-zbuf3a*zbuf1a*cdig_fun(c_nil,-c_i*zbuf3*ttbuf2)
+
+							zbuf5 = ( log(-c_i*zbuf2*ttbuf)-log(-c_i*zbuf1*ttbuf)+log(zbuf1)-log(zbuf2))
+							if(abs(aimag(zbuf5))>5.0e-15) then
+								Kbuf(i,i) = exp(c_i*(valt0(i,i))*ttbuf)*zbuf5
+							else
+								Kbuf(i,i) = c_nil
+							end if
+						    Kbuf(i,i) = Kbuf(i,i)+zbuf2a*cdig_fun(c_nil,-c_i*zbuf2*ttbuf)-zbuf3a*cdig_fun(c_nil,-c_i*zbuf1*ttbuf)
+
+							Kbuf(i,i) = Kbuf(i,i)+zbuf4
 						else
-							Kbuf(i,i) = cdlog(zbuf1)-cdlog(zbuf2)
-							Kbuf(i,i) = Kbuf(i,i)*cdexp(c_i*(valt0(i,i))*ttbuf)
+							Kbuf(i,i) = log(zbuf1)-log(zbuf2)+( cdig_fun(c_nil,fermi_apx*zbuf1)-zbuf1a*cdig_fun(c_nil,fermi_apx*zbuf3) )
 						end if
 					end do
-					!!$OMP END DO
-					!!$OMP END PARALLEL
-					buf1 = vect0
-					call matrixmul(buf2,buf1,Kbuf,Ddim)
-					call matrixinv(buf1,Ddim)
-					call matrixmul(Kbuf,buf2,buf1,Ddim)
+					!$OMP END DO
+					!$OMP END PARALLEL
+					forall(i=1:Ddim,j=1:Ddim) buf2(j,i) = vect0(j,i)*Kbuf(i,i)
+					call matrixmul(Kbuf,buf2,vect0inv,Ddim)
 				end if
 				call matrixmul(buf1,Kbuf,GF%GaL,Ddim)                         ! KL1 for L electrode
 				call matrixmul(buf2,UL,buf1,Ddim)
@@ -1328,7 +1465,7 @@ module integrand_fun
 				end if
 				! ========== integration for KL2/KR2/KN2 ==========
 				if(diag_int==0) then
-					forall(i=1:GF%Ddim,j=1:GF%Ddim,k=1:ncpus) bufn(i,j,k) = c_nil 
+					forall(i=1:GF%Ddim,j=1:GF%Ddim,k=1:ncpus) bufn(i,j,k) = c_nil
 					forall(i=1:GF%Ddim,j=1:GF%Ddim,k=1:ncpus) bufn2(i,j,k) = c_nil
 					forall(i=1:GF%Ddim,j=1:GF%Ddim,k=1:ncpus) bufn3(i,j,k) = c_nil
 					!$OMP PARALLEL DEFAULT(SHARED) PRIVATE(ee,tid)
@@ -1338,20 +1475,20 @@ module integrand_fun
 						! calculate retarded green function
 						ee = eiit(i)
 						! for KL2
-                        bufq(:,:,tid) = (ee+VL+c_i*delta*mag)*sm-heff          
+						bufq(:,:,tid) = (ee+VL+c_i*delta*mag)*sm-heff
 						call matrixinv(bufq(:,:,tid),Ddim)
-						bufp(:,:,tid) = idty-UL*cdexp(c_i*(ee)*(tt/(hpa*10.0_R_KIND**12)))
+						bufp(:,:,tid) = idty-UL*exp(c_i*(ee)*(tt/(hpa*10.0_R_KIND**12)))
 						call matrixmul(bufm(:,:,tid),bufp(:,:,tid),bufq(:,:,tid),Ddim)
 						bufn(:,:,tid) = bufn(:,:,tid)+bufm(:,:,tid)*(fermi(ee,Ef)*deiit(i))
 						! for KR2
-                        bufq(:,:,tid) = (ee+VR+c_i*delta*mag)*sm-heff          
+						bufq(:,:,tid) = (ee+VR+c_i*delta*mag)*sm-heff
 						call matrixinv(bufq(:,:,tid),Ddim)
-						bufp(:,:,tid) = idty-UR*cdexp(c_i*(ee)*(tt/(hpa*10.0_R_KIND**12)))
+						bufp(:,:,tid) = idty-UR*exp(c_i*(ee)*(tt/(hpa*10.0_R_KIND**12)))
 						call matrixmul(bufm(:,:,tid),bufp(:,:,tid),bufq(:,:,tid),Ddim)
 						bufn2(:,:,tid) = bufn2(:,:,tid)+bufm(:,:,tid)*(fermi(ee,Ef)*deiit(i))
 						if(TdHS .and. NADi) then
 							! for KN2
-							bufp(:,:,tid) = idty-UN*cdexp(c_i*ee*(tt/(hpa*10.0_R_KIND**12)))
+							bufp(:,:,tid) = idty-UN*exp(c_i*ee*(tt/(hpa*10.0_R_KIND**12)))
 							call matrixmul(bufm(:,:,tid),bufp(:,:,tid),bufq(:,:,tid),Ddim)
 							bufn3(:,:,tid) = bufn3(:,:,tid)+bufm(:,:,tid)*(fermi(ee,Ef)*deiit(i))
 						end if
@@ -1361,14 +1498,14 @@ module integrand_fun
 					! sum for KL2
 					forall(i=1:Ddim,j=1:Ddim) Kbuf(i,j) = c_nil                   ! collect data
 					do i = 1, ncpus
-						Kbuf = Kbuf+bufn(:,:,i) 
+						Kbuf = Kbuf+bufn(:,:,i)
 					end do
 					call matrixmul(buf1,Kbuf,GF%GaL,Ddim)
 					KL2 = buf1*(-2.0_R_KIND*c_i/pi)
 					! sum for KR2
 					forall(i=1:Ddim,j=1:Ddim) Kbuf(i,j) = c_nil                   ! collect data
 					do i = 1, ncpus
-						Kbuf = Kbuf+bufn2(:,:,i) 
+						Kbuf = Kbuf+bufn2(:,:,i)
 					end do
 					call matrixmul(buf1,Kbuf,GF%GaR,Ddim)
 					KR2 = buf1*(-2.0_R_KIND*c_i/pi)
@@ -1376,7 +1513,7 @@ module integrand_fun
 					if(TdHS .and. NADi) then
 						forall(i=1:Ddim,j=1:Ddim) Kbuf(i,j) = c_nil                   ! collect data
 						do i = 1, ncpus
-							Kbuf = Kbuf+bufn3(:,:,i) 
+							Kbuf = Kbuf+bufn3(:,:,i)
 						end do
 						call matrixmul(buf1,Kbuf,GF%GaN,Ddim)
 						KN2 = buf1*(-2.0_R_KIND*c_i/pi)
@@ -1400,43 +1537,58 @@ module integrand_fun
 					! call integrand functions
 					forall(i=1:Ddim,j=1:Ddim) Kbuf(i,j) = c_nil
 					forall(i=1:Ddim,j=1:Ddim) Kbuft(i,j) = c_nil
-					!$OMP PARALLEL DEFAULT(SHARED) PRIVATE(tid,resultr,resulti,abserr,neval,ier,ieri,last)
+					!$OMP PARALLEL DEFAULT(SHARED) PRIVATE(tid,resultr,resulti,abserr,neval,ier,ieri,last,sng_pnti,pp)
 					!$OMP DO
 					do i = 1, Ddim
 						tid = OMP_GET_THREAD_NUM()+1
 						zbufs(1,tid) = valt(i,i)-VL
-						call dqagpe(integrand1_re,elow,ehigh,ii+2,sng_pnts,0.001_R_KIND*delta,0.001_R_KIND*delta,nitgl,resultr, &
+						if( (real(zbufs(1,tid),kind=R_KIND)>=elow .and. real(zbufs(1,tid),kind=R_KIND)<=ehigh) .and. (aimag(zbufs(1,tid))>=elow .and. aimag(zbufs(1,tid))<=ehigh) ) then
+							pp=4
+							allocate(sng_pnti(pp))
+							sng_pnti(1)=real(zbufs(1,tid),kind=R_KIND)
+							sng_pnti(2)=aimag(zbufs(1,tid))
+						else if( (real(zbufs(1,tid),kind=R_KIND)>=elow .and. real(zbufs(1,tid),kind=R_KIND)<=ehigh) .and. (aimag(zbufs(1,tid))<elow .or. aimag(zbufs(1,tid))>ehigh) ) then
+							pp=3
+							allocate(sng_pnti(pp))
+							sng_pnti(1)=real(zbufs(1,tid),kind=R_KIND)
+						else if( (real(zbufs(1,tid),kind=R_KIND)<elow .or. real(zbufs(1,tid),kind=R_KIND)>ehigh) .and. (aimag(zbufs(1,tid))>=elow .and. aimag(zbufs(1,tid))<=ehigh) ) then
+							pp=3
+							allocate(sng_pnti(pp))
+							sng_pnti(1)=aimag(zbufs(1,tid))
+						else
+							pp=2
+							allocate(sng_pnti(pp))
+						end if
+						call dqagpe(integrand1_re,elow,ehigh,pp,sng_pnti,0.01_R_KIND*delta,0.01_R_KIND*delta,nitgl,resultr, &
 									& abserr,neval,ier,alist_m(:,tid),blist_m(:,tid),rlist_m(:,tid),elist_m(:,tid), &
 									& pts_m(:,tid),iord_m(:,tid),level_m(:,tid),ndin_m(:,tid),last)
-						call dqagpe(integrand1_im,elow,ehigh,ii+2,sng_pnts,0.001_R_KIND*delta,0.001_R_KIND*delta,nitgl,resulti, &
+						call dqagpe(integrand1_im,elow,ehigh,pp,sng_pnti,0.01_R_KIND*delta,0.01_R_KIND*delta,nitgl,resulti, &
 									& abserr,neval,ieri,alist_m(:,tid),blist_m(:,tid),rlist_m(:,tid),elist_m(:,tid), &
 									& pts_m(:,tid),iord_m(:,tid),level_m(:,tid),ndin_m(:,tid),last)
-						if(ier>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of rho_ini !", ier
-						if(ieri>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of rho_ini !", ieri
+						if(ier>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of RE-rho_ini 6!", ier
+						if(ieri>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of IM-rho_ini 6!", ieri
 						Kbuf(i,i) = c_one*resultr+c_i*resulti
-						call dqagpe(integrand2_re,elow,ehigh,ii+2,sng_pnts,0.001_R_KIND*delta,0.001_R_KIND*delta,nitgl,resultr, &
+						call dqagpe(integrand2_re,elow,ehigh,pp,sng_pnti,0.01_R_KIND*delta,0.01_R_KIND*delta,nitgl,resultr, &
 									& abserr,neval,ier,alist_m(:,tid),blist_m(:,tid),rlist_m(:,tid),elist_m(:,tid), &
 									& pts_m(:,tid),iord_m(:,tid),level_m(:,tid),ndin_m(:,tid),last)
-						call dqagpe(integrand2_im,elow,ehigh,ii+2,sng_pnts,0.001_R_KIND*delta,0.001_R_KIND*delta,nitgl,resulti, &
+						call dqagpe(integrand2_im,elow,ehigh,pp,sng_pnti,0.01_R_KIND*delta,0.01_R_KIND*delta,nitgl,resulti, &
 									& abserr,neval,ieri,alist_m(:,tid),blist_m(:,tid),rlist_m(:,tid),elist_m(:,tid), &
 									& pts_m(:,tid),iord_m(:,tid),level_m(:,tid),ndin_m(:,tid),last)
-						if(ier>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of rho_ini !", ier
-						if(ieri>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of rho_ini !", ieri
+						if(ier>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of RE-rho_ini 7!", ier
+						if(ieri>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of IM-rho_ini 7!", ieri
 						Kbuft(i,i) = c_one*resultr+c_i*resulti
+						deallocate(sng_pnti)
 					end do
 					!$OMP END DO
 					!$OMP END PARALLEL
 					deallocate(sng_pnts,ndin_m,pts_m)
-					buf1 = vect
-					buf3 = vect
-					call matrixinv(buf3,Ddim)
 					! non-exp(t) term
-					call matrixmul(buf2,Kbuf,buf3,Ddim)
-					call matrixmul(Kbuf,buf1,buf2,Ddim)
+					forall(i=1:Ddim,j=1:Ddim) buf2(j,i) = vect(j,i)*Kbuf(i,i)
+					call matrixmul(Kbuf,buf2,vectinv,Ddim)
 					! exp(t) term
-					call matrixmul(buf2,Kbuft,buf3,Ddim)
-					call matrixmul(Kbuft,buf1,buf2,Ddim)
-					! sum 
+					forall(i=1:Ddim,j=1:Ddim) buf2(j,i) = vect(j,i)*Kbuft(i,i)
+					call matrixmul(Kbuft,buf2,vectinv,Ddim)
+					! sum
 					call matrixmul(buf1,UL,Kbuft,Ddim)
 					buf1 = Kbuf-buf1
 					call matrixmul(KL2,buf1,GF%GaL,Ddim)
@@ -1458,43 +1610,58 @@ module integrand_fun
 					! call integrand functions
 					forall(i=1:Ddim,j=1:Ddim) Kbuf(i,j) = c_nil
 					forall(i=1:Ddim,j=1:Ddim) Kbuft(i,j) = c_nil
-					!$OMP PARALLEL DEFAULT(SHARED) PRIVATE(tid,resultr,resulti,abserr,neval,ier,ieri,last)
+					!$OMP PARALLEL DEFAULT(SHARED) PRIVATE(tid,resultr,resulti,abserr,neval,ier,ieri,last,sng_pnti,pp)
 					!$OMP DO
 					do i = 1, Ddim
 						tid = OMP_GET_THREAD_NUM()+1
 						zbufs(1,tid) = valt(i,i)-VR
-						call dqagpe(integrand1_re,elow,ehigh,ii+2,sng_pnts,0.001_R_KIND*delta,0.001_R_KIND*delta,nitgl,resultr, &
+						if( (real(zbufs(1,tid),kind=R_KIND)>=elow .and. real(zbufs(1,tid),kind=R_KIND)<=ehigh) .and. (aimag(zbufs(1,tid))>=elow .and. aimag(zbufs(1,tid))<=ehigh) ) then
+							pp=4
+							allocate(sng_pnti(pp))
+							sng_pnti(1)=real(zbufs(1,tid),kind=R_KIND)
+							sng_pnti(2)=aimag(zbufs(1,tid))
+						else if( (real(zbufs(1,tid),kind=R_KIND)>=elow .and. real(zbufs(1,tid),kind=R_KIND)<=ehigh) .and. (aimag(zbufs(1,tid))<elow .or. aimag(zbufs(1,tid))>ehigh) ) then
+							pp=3
+							allocate(sng_pnti(pp))
+							sng_pnti(1)=real(zbufs(1,tid),kind=R_KIND)
+						else if( (real(zbufs(1,tid),kind=R_KIND)<elow .or. real(zbufs(1,tid),kind=R_KIND)>ehigh) .and. (aimag(zbufs(1,tid))>=elow .and. aimag(zbufs(1,tid))<=ehigh) ) then
+							pp=3
+							allocate(sng_pnti(pp))
+							sng_pnti(1)=aimag(zbufs(1,tid))
+						else
+							pp=2
+							allocate(sng_pnti(pp))
+						end if
+						call dqagpe(integrand1_re,elow,ehigh,pp,sng_pnti,0.01_R_KIND*delta,0.01_R_KIND*delta,nitgl,resultr, &
 									& abserr,neval,ier,alist_m(:,tid),blist_m(:,tid),rlist_m(:,tid),elist_m(:,tid), &
 									& pts_m(:,tid),iord_m(:,tid),level_m(:,tid),ndin_m(:,tid),last)
-						call dqagpe(integrand1_im,elow,ehigh,ii+2,sng_pnts,0.001_R_KIND*delta,0.001_R_KIND*delta,nitgl,resulti, &
+						call dqagpe(integrand1_im,elow,ehigh,pp,sng_pnti,0.01_R_KIND*delta,0.01_R_KIND*delta,nitgl,resulti, &
 									& abserr,neval,ieri,alist_m(:,tid),blist_m(:,tid),rlist_m(:,tid),elist_m(:,tid), &
 									& pts_m(:,tid),iord_m(:,tid),level_m(:,tid),ndin_m(:,tid),last)
-						if(ier>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of rho_ini !", ier
-						if(ieri>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of rho_ini !", ieri
+						if(ier>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of RE-rho_ini 8!", ier
+						if(ieri>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of IM-rho_ini 8!", ieri
 						Kbuf(i,i) = c_one*resultr+c_i*resulti
-						call dqagpe(integrand2_re,elow,ehigh,ii+2,sng_pnts,0.001_R_KIND*delta,0.001_R_KIND*delta,nitgl,resultr, &
+						call dqagpe(integrand2_re,elow,ehigh,pp,sng_pnti,0.01_R_KIND*delta,0.01_R_KIND*delta,nitgl,resultr, &
 									& abserr,neval,ier,alist_m(:,tid),blist_m(:,tid),rlist_m(:,tid),elist_m(:,tid), &
 									& pts_m(:,tid),iord_m(:,tid),level_m(:,tid),ndin_m(:,tid),last)
-						call dqagpe(integrand2_im,elow,ehigh,ii+2,sng_pnts,0.001_R_KIND*delta,0.001_R_KIND*delta,nitgl,resulti, &
+						call dqagpe(integrand2_im,elow,ehigh,pp,sng_pnti,0.01_R_KIND*delta,0.01_R_KIND*delta,nitgl,resulti, &
 									& abserr,neval,ieri,alist_m(:,tid),blist_m(:,tid),rlist_m(:,tid),elist_m(:,tid), &
 									& pts_m(:,tid),iord_m(:,tid),level_m(:,tid),ndin_m(:,tid),last)
-						if(ier>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of rho_ini !", ier
-						if(ieri>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of rho_ini !", ieri
+						if(ier>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of RE-rho_ini 9!", ier
+						if(ieri>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of IM-rho_ini 9!", ieri
 						Kbuft(i,i) = c_one*resultr+c_i*resulti
+						deallocate(sng_pnti)
 					end do
 					!$OMP END DO
 					!$OMP END PARALLEL
 					deallocate(sng_pnts,ndin_m,pts_m)
-					buf1 = vect
-					buf3 = vect
-					call matrixinv(buf3,Ddim)
 					! non-exp(t) term
-					call matrixmul(buf2,Kbuf,buf3,Ddim)
-					call matrixmul(Kbuf,buf1,buf2,Ddim)
+					forall(i=1:Ddim,j=1:Ddim) buf2(j,i) = vect(j,i)*Kbuf(i,i)
+					call matrixmul(Kbuf,buf2,vectinv,Ddim)
 					! exp(t) term
-					call matrixmul(buf2,Kbuft,buf3,Ddim)
-					call matrixmul(Kbuft,buf1,buf2,Ddim)
-					! sum 
+					forall(i=1:Ddim,j=1:Ddim) buf2(j,i) = vect(j,i)*Kbuft(i,i)
+					call matrixmul(Kbuft,buf2,vectinv,Ddim)
+					! sum
 					call matrixmul(buf1,UR,Kbuft,Ddim)
 					buf1 = Kbuf-buf1
 					call matrixmul(KR2,buf1,GF%GaR,Ddim)
@@ -1517,43 +1684,58 @@ module integrand_fun
 						! call integrand functions
 						forall(i=1:Ddim,j=1:Ddim) Kbuf(i,j) = c_nil
 						forall(i=1:Ddim,j=1:Ddim) Kbuft(i,j) = c_nil
-						!$OMP PARALLEL DEFAULT(SHARED) PRIVATE(tid,resultr,resulti,abserr,neval,ier,ieri,last)
+						!$OMP PARALLEL DEFAULT(SHARED) PRIVATE(tid,resultr,resulti,abserr,neval,ier,ieri,last,sng_pnti,pp)
 						!$OMP DO
 						do i = 1, Ddim
 							tid = OMP_GET_THREAD_NUM()+1
 							zbufs(1,tid) = valt(i,i)
-							call dqagpe(integrand1_re,elow,ehigh,ii+2,sng_pnts,0.001_R_KIND*delta,0.001_R_KIND*delta,nitgl,resultr, &
+							if( (real(zbufs(1,tid),kind=R_KIND)>=elow .and. real(zbufs(1,tid),kind=R_KIND)<=ehigh) .and. (aimag(zbufs(1,tid))>=elow .and. aimag(zbufs(1,tid))<=ehigh) ) then
+								pp=4
+								allocate(sng_pnti(pp))
+								sng_pnti(1)=real(zbufs(1,tid),kind=R_KIND)
+								sng_pnti(2)=aimag(zbufs(1,tid))
+							else if( (real(zbufs(1,tid),kind=R_KIND)>=elow .and. real(zbufs(1,tid),kind=R_KIND)<=ehigh) .and. (aimag(zbufs(1,tid))<elow .or. aimag(zbufs(1,tid))>ehigh) ) then
+								pp=3
+								allocate(sng_pnti(pp))
+								sng_pnti(1)=real(zbufs(1,tid),kind=R_KIND)
+							else if( (real(zbufs(1,tid),kind=R_KIND)<elow .or. real(zbufs(1,tid),kind=R_KIND)>ehigh) .and. (aimag(zbufs(1,tid))>=elow .and. aimag(zbufs(1,tid))<=ehigh) ) then
+								pp=3
+								allocate(sng_pnti(pp))
+								sng_pnti(1)=aimag(zbufs(1,tid))
+							else
+								pp=2
+								allocate(sng_pnti(pp))
+							end if
+							call dqagpe(integrand1_re,elow,ehigh,pp,sng_pnti,0.01_R_KIND*delta,0.01_R_KIND*delta,nitgl,resultr, &
 										& abserr,neval,ier,alist_m(:,tid),blist_m(:,tid),rlist_m(:,tid),elist_m(:,tid), &
 										& pts_m(:,tid),iord_m(:,tid),level_m(:,tid),ndin_m(:,tid),last)
-							call dqagpe(integrand1_im,elow,ehigh,ii+2,sng_pnts,0.001_R_KIND*delta,0.001_R_KIND*delta,nitgl,resulti, &
+							call dqagpe(integrand1_im,elow,ehigh,pp,sng_pnti,0.01_R_KIND*delta,0.01_R_KIND*delta,nitgl,resulti, &
 										& abserr,neval,ieri,alist_m(:,tid),blist_m(:,tid),rlist_m(:,tid),elist_m(:,tid), &
 										& pts_m(:,tid),iord_m(:,tid),level_m(:,tid),ndin_m(:,tid),last)
-							if(ier>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of rho_ini !", ier
-							if(ieri>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of rho_ini !", ieri
+							if(ier>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of RE-rho_ini 10!", ier
+							if(ieri>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of IM-rho_ini 10!", ieri
 							Kbuf(i,i) = c_one*resultr+c_i*resulti
-							call dqagpe(integrand2_re,elow,ehigh,ii+2,sng_pnts,0.001_R_KIND*delta,0.001_R_KIND*delta,nitgl,resultr, &
+							call dqagpe(integrand2_re,elow,ehigh,pp,sng_pnti,0.01_R_KIND*delta,0.01_R_KIND*delta,nitgl,resultr, &
 										& abserr,neval,ier,alist_m(:,tid),blist_m(:,tid),rlist_m(:,tid),elist_m(:,tid), &
 										& pts_m(:,tid),iord_m(:,tid),level_m(:,tid),ndin_m(:,tid),last)
-							call dqagpe(integrand2_im,elow,ehigh,ii+2,sng_pnts,0.001_R_KIND*delta,0.001_R_KIND*delta,nitgl,resulti, &
+							call dqagpe(integrand2_im,elow,ehigh,pp,sng_pnti,0.01_R_KIND*delta,0.01_R_KIND*delta,nitgl,resulti, &
 										& abserr,neval,ieri,alist_m(:,tid),blist_m(:,tid),rlist_m(:,tid),elist_m(:,tid), &
 										& pts_m(:,tid),iord_m(:,tid),level_m(:,tid),ndin_m(:,tid),last)
-							if(ier>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of rho_ini !", ier
-							if(ieri>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of rho_ini !", ieri
+							if(ier>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of RE-rho_ini 11!", ier
+							if(ieri>0 .and. tid==1) write(*,*) "integrand_fun: warning on integral convergence of IM-rho_ini 11!", ieri
 							Kbuft(i,i) = c_one*resultr+c_i*resulti
+							deallocate(sng_pnti)
 						end do
 						!$OMP END DO
 						!$OMP END PARALLEL
 						deallocate(sng_pnts,ndin_m,pts_m)
-						buf1 = vect
-						buf3 = vect
-						call matrixinv(buf3,Ddim)
 						! non-exp(t) term
-						call matrixmul(buf2,Kbuf,buf3,Ddim)
-						call matrixmul(Kbuf,buf1,buf2,Ddim)
+						forall(i=1:Ddim,j=1:Ddim) buf2(j,i) = vect(j,i)*Kbuf(i,i)
+						call matrixmul(Kbuf,buf2,vectinv,Ddim)
 						! exp(t) term
-						call matrixmul(buf2,Kbuft,buf3,Ddim)
-						call matrixmul(Kbuft,buf1,buf2,Ddim)
-						! sum 
+						forall(i=1:Ddim,j=1:Ddim) buf2(j,i) = vect(j,i)*Kbuft(i,i)
+						call matrixmul(Kbuft,buf2,vectinv,Ddim)
+						! sum
 						call matrixmul(buf1,UN,Kbuft,Ddim)
 						buf1 = Kbuf-buf1
 						call matrixmul(KN2,buf1,GF%GaN,Ddim)
@@ -1561,38 +1743,54 @@ module integrand_fun
 					end if
 				else if(diag_int==2) then
 					ttbuf = tt/(hpa*10.0_R_KIND**12)
+					ttbuf2 = ttbuf+c_i*fermi_apx
+					zbuf1a = exp(fermi_apx*(ehigh-ehigh_apx))
+					zbuf2a = exp(c_i*ttbuf*elow)
+					zbuf3a = exp(c_i*ttbuf*ehigh)
+					zbuf4a = exp(fermi_apx*ehigh)
 					! === KL2 term ===
 					forall(i=1:Ddim,j=1:Ddim) Kbuf(i,j) = c_nil
 					forall(i=1:Ddim,j=1:Ddim) Kbuft(i,j) = c_nil
-					!!$OMP PARALLEL DEFAULT(SHARED) PRIVATE(zbuf1,zbuf2)
-					!!$OMP DO
+					!$OMP PARALLEL DEFAULT(SHARED) PRIVATE(zbuf1,zbuf2,zbuf3,zbuf4,zbuf5)
+					!$OMP DO
 					do i = 1, Ddim
 						zbuf1 = ehigh-(valt(i,i)-VL)
 						zbuf2 = elow-(valt(i,i)-VL)
+						zbuf3 = ehigh_apx-(valt(i,i)-VL)
 						! non-exp(t) term
-						Kbuf(i,i) = cdlog(zbuf1)-cdlog(zbuf2)
+						Kbuf(i,i) = log(zbuf1)-log(zbuf2)+( cdig_fun(c_nil,fermi_apx*zbuf1)-zbuf1a*cdig_fun(c_nil,fermi_apx*zbuf3) )
 						! exp(t) term
-						if(ttbuf>0.0_R_KIND) then
-							Kbuft(i,i) = cdig(c_nil,-c_i*zbuf2*ttbuf)-cdig(c_nil,-c_i*zbuf1*ttbuf)+ &
-										& cdlog(-c_i*zbuf2*ttbuf)-cdlog(-c_i*zbuf1*ttbuf)+cdlog(zbuf1)-cdlog(zbuf2)
-							Kbuft(i,i) = Kbuft(i,i)*cdexp(c_i*(valt0(i,i)-VL)*ttbuf)
+						if(n>0 .or. u>1) then
+							zbuf5 = ( log(-c_i*zbuf1*ttbuf2)-log(-c_i*zbuf3*ttbuf2)+log(zbuf3)-log(zbuf1))
+							if(abs(aimag(zbuf5))>5.0e-15) then
+								zbuf4 = exp(c_i*(valt(i,i)-VL)*ttbuf2)*zbuf4a*zbuf5
+							else
+								zbuf4 = c_nil
+							end if
+						    zbuf4 = zbuf4+zbuf3a*cdig_fun(c_nil,-c_i*zbuf1*ttbuf2)-zbuf3a*zbuf1a*cdig_fun(c_nil,-c_i*zbuf3*ttbuf2)
+
+							zbuf5 = ( log(-c_i*zbuf2*ttbuf)-log(-c_i*zbuf1*ttbuf)+log(zbuf1)-log(zbuf2))
+							if(abs(aimag(zbuf5))>5.0e-15) then
+								Kbuft(i,i) = exp(c_i*(valt(i,i)-VL)*ttbuf)*zbuf5
+							else
+								Kbuft(i,i) = c_nil
+							end if
+						    Kbuft(i,i) = Kbuft(i,i)+zbuf2a*cdig_fun(c_nil,-c_i*zbuf2*ttbuf)-zbuf3a*cdig_fun(c_nil,-c_i*zbuf1*ttbuf)
+
+							Kbuft(i,i) = Kbuft(i,i)+zbuf4
 						else
-							Kbuft(i,i) = cdlog(zbuf1)-cdlog(zbuf2)
-							Kbuft(i,i) = Kbuft(i,i)*cdexp(c_i*(valt0(i,i)-VL)*ttbuf)
+							Kbuft(i,i) = Kbuf(i,i)
 						end if
 					end do
-					!!$OMP END DO
-					!!$OMP END PARALLEL
-					buf1 = vect
-					buf3 = vect
-					call matrixinv(buf3,Ddim)
+					!$OMP END DO
+					!$OMP END PARALLEL
 					! non-exp(t) term
-					call matrixmul(buf2,Kbuf,buf3,Ddim)
-					call matrixmul(Kbuf,buf1,buf2,Ddim)
+					forall(i=1:Ddim,j=1:Ddim) buf2(j,i) = vect(j,i)*Kbuf(i,i)
+					call matrixmul(Kbuf,buf2,vectinv,Ddim)
 					! exp(t) term
-					call matrixmul(buf2,Kbuft,buf3,Ddim)
-					call matrixmul(Kbuft,buf1,buf2,Ddim)
-					! sum 
+					forall(i=1:Ddim,j=1:Ddim) buf2(j,i) = vect(j,i)*Kbuft(i,i)
+					call matrixmul(Kbuft,buf2,vectinv,Ddim)
+					! sum
 					call matrixmul(buf1,UL,Kbuft,Ddim)
 					buf1 = Kbuf-buf1
 					call matrixmul(KL2,buf1,GF%GaL,Ddim)
@@ -1600,35 +1798,46 @@ module integrand_fun
 					! === KR2 term ===
 					forall(i=1:Ddim,j=1:Ddim) Kbuf(i,j) = c_nil
 					forall(i=1:Ddim,j=1:Ddim) Kbuft(i,j) = c_nil
-					!!$OMP PARALLEL DEFAULT(SHARED) PRIVATE(zbuf1,zbuf2)
-					!!$OMP DO
+					!$OMP PARALLEL DEFAULT(SHARED) PRIVATE(zbuf1,zbuf2,zbuf3,zbuf4,zbuf5)
+					!$OMP DO
 					do i = 1, Ddim
 						zbuf1 = ehigh-(valt(i,i)-VR)
 						zbuf2 = elow-(valt(i,i)-VR)
+						zbuf3 = ehigh_apx-(valt(i,i)-VR)
 						! non-exp(t) term
-						Kbuf(i,i) = cdlog(zbuf1)-cdlog(zbuf2)
+						Kbuf(i,i) = log(zbuf1)-log(zbuf2)+( cdig_fun(c_nil,fermi_apx*zbuf1)-zbuf1a*cdig_fun(c_nil,fermi_apx*zbuf3) )
 						! exp(t) term
-						if(ttbuf>0.0_R_KIND) then
-							Kbuft(i,i) = cdig(c_nil,-c_i*zbuf2*ttbuf)-cdig(c_nil,-c_i*zbuf1*ttbuf)+ &
-										& cdlog(-c_i*zbuf2*ttbuf)-cdlog(-c_i*zbuf1*ttbuf)+cdlog(zbuf1)-cdlog(zbuf2)
-							Kbuft(i,i) = Kbuft(i,i)*cdexp(c_i*(valt0(i,i)-VR)*ttbuf)
+						if(n>0 .or. u>1) then
+							zbuf5 = ( log(-c_i*zbuf1*ttbuf2)-log(-c_i*zbuf3*ttbuf2)+log(zbuf3)-log(zbuf1))
+							if(abs(aimag(zbuf5))>5.0e-15) then
+								zbuf4 = exp(c_i*(valt(i,i)-VR)*ttbuf2)*zbuf4a*zbuf5
+							else
+								zbuf4 = c_nil
+							end if
+						    zbuf4 = zbuf4+zbuf3a*cdig_fun(c_nil,-c_i*zbuf1*ttbuf2)-zbuf3a*zbuf1a*cdig_fun(c_nil,-c_i*zbuf3*ttbuf2)
+
+							zbuf5 = ( log(-c_i*zbuf2*ttbuf)-log(-c_i*zbuf1*ttbuf)+log(zbuf1)-log(zbuf2))
+							if(abs(aimag(zbuf5))>5.0e-15) then
+								Kbuft(i,i) = exp(c_i*(valt(i,i)-VR)*ttbuf)*zbuf5
+							else
+								Kbuft(i,i) = c_nil
+							end if
+						    Kbuft(i,i) = Kbuft(i,i)+zbuf2a*cdig_fun(c_nil,-c_i*zbuf2*ttbuf)-zbuf3a*cdig_fun(c_nil,-c_i*zbuf1*ttbuf)
+
+							Kbuft(i,i) = Kbuft(i,i)+zbuf4
 						else
-							Kbuft(i,i) = cdlog(zbuf1)-cdlog(zbuf2)
-							Kbuft(i,i) = Kbuft(i,i)*cdexp(c_i*(valt0(i,i)-VR)*ttbuf)
+							Kbuft(i,i) = Kbuf(i,i)
 						end if
 					end do
-					!!$OMP END DO
-					!!$OMP END PARALLEL
-					buf1 = vect
-					buf3 = vect
-					call matrixinv(buf3,Ddim)
+					!$OMP END DO
+					!$OMP END PARALLEL
 					! non-exp(t) term
-					call matrixmul(buf2,Kbuf,buf3,Ddim)
-					call matrixmul(Kbuf,buf1,buf2,Ddim)
+					forall(i=1:Ddim,j=1:Ddim) buf2(j,i) = vect(j,i)*Kbuf(i,i)
+					call matrixmul(Kbuf,buf2,vectinv,Ddim)
 					! exp(t) term
-					call matrixmul(buf2,Kbuft,buf3,Ddim)
-					call matrixmul(Kbuft,buf1,buf2,Ddim)
-					! sum 
+					forall(i=1:Ddim,j=1:Ddim) buf2(j,i) = vect(j,i)*Kbuft(i,i)
+					call matrixmul(Kbuft,buf2,vectinv,Ddim)
+					! sum
 					call matrixmul(buf1,UR,Kbuft,Ddim)
 					buf1 = Kbuf-buf1
 					call matrixmul(KR2,buf1,GF%GaR,Ddim)
@@ -1637,35 +1846,46 @@ module integrand_fun
 					if(TdHS .and. NADi) then
 						forall(i=1:Ddim,j=1:Ddim) Kbuf(i,j) = c_nil
 						forall(i=1:Ddim,j=1:Ddim) Kbuft(i,j) = c_nil
-						!!$OMP PARALLEL DEFAULT(SHARED) PRIVATE(zbuf1,zbuf2)
-						!!$OMP DO
+						!$OMP PARALLEL DEFAULT(SHARED) PRIVATE(zbuf1,zbuf2,zbuf3,zbuf4,zbuf5)
+						!$OMP DO
 						do i = 1, Ddim
 							zbuf1 = ehigh-(valt(i,i))
 							zbuf2 = elow-(valt(i,i))
+							zbuf3 = ehigh_apx-(valt(i,i))
 							! non-exp(t) term
-							Kbuf(i,i) = cdlog(zbuf1)-cdlog(zbuf2)
+							Kbuf(i,i) = log(zbuf1)-log(zbuf2)+( cdig_fun(c_nil,fermi_apx*zbuf1)-zbuf1a*cdig_fun(c_nil,fermi_apx*zbuf3) )
 							! exp(t) term
-							if(ttbuf>0.0_R_KIND) then
-								Kbuft(i,i) = cdig(c_nil,-c_i*zbuf2*ttbuf)-cdig(c_nil,-c_i*zbuf1*ttbuf)+ &
-											& cdlog(-c_i*zbuf2*ttbuf)-cdlog(-c_i*zbuf1*ttbuf)+cdlog(zbuf1)-cdlog(zbuf2)
-								Kbuft(i,i) = Kbuft(i,i)*cdexp(c_i*(valt0(i,i))*ttbuf)
+							if(n>0 .or. u>1) then
+								zbuf5 = ( log(-c_i*zbuf1*ttbuf2)-log(-c_i*zbuf3*ttbuf2)+log(zbuf3)-log(zbuf1))
+								if(abs(aimag(zbuf5))>5.0e-15) then
+									zbuf4 = exp(c_i*(valt(i,i))*ttbuf2)*zbuf4a*zbuf5
+								else
+									zbuf4 = c_nil
+								end if
+						        zbuf4 = zbuf4+zbuf3a*cdig_fun(c_nil,-c_i*zbuf1*ttbuf2)-zbuf3a*zbuf1a*cdig_fun(c_nil,-c_i*zbuf3*ttbuf2)
+
+								zbuf5 = ( log(-c_i*zbuf2*ttbuf)-log(-c_i*zbuf1*ttbuf)+log(zbuf1)-log(zbuf2))
+								if(abs(aimag(zbuf5))>5.0e-15) then
+									Kbuft(i,i) = exp(c_i*(valt(i,i))*ttbuf)*zbuf5
+								else
+									Kbuft(i,i) = c_nil
+								end if
+						        Kbuft(i,i) = Kbuft(i,i)+zbuf2a*cdig_fun(c_nil,-c_i*zbuf2*ttbuf)-zbuf3a*cdig_fun(c_nil,-c_i*zbuf1*ttbuf)
+
+								Kbuft(i,i) = Kbuft(i,i)+zbuf4
 							else
-								Kbuft(i,i) = cdlog(zbuf1)-cdlog(zbuf2)
-								Kbuft(i,i) = Kbuft(i,i)*cdexp(c_i*(valt0(i,i))*ttbuf)
+								Kbuft(i,i) = Kbuf(i,i)
 							end if
 						end do
-						!!$OMP END DO
-						!!$OMP END PARALLEL
-						buf1 = vect
-						buf3 = vect
-						call matrixinv(buf3,Ddim)
+						!$OMP END DO
+						!$OMP END PARALLEL
 						! non-exp(t) term
-						call matrixmul(buf2,Kbuf,buf3,Ddim)
-						call matrixmul(Kbuf,buf1,buf2,Ddim)
+						forall(i=1:Ddim,j=1:Ddim) buf2(j,i) = vect(j,i)*Kbuf(i,i)
+						call matrixmul(Kbuf,buf2,vectinv,Ddim)
 						! exp(t) term
-						call matrixmul(buf2,Kbuft,buf3,Ddim)
-						call matrixmul(Kbuft,buf1,buf2,Ddim)
-						! sum 
+						forall(i=1:Ddim,j=1:Ddim) buf2(j,i) = vect(j,i)*Kbuft(i,i)
+						call matrixmul(Kbuft,buf2,vectinv,Ddim)
+						! sum
 						call matrixmul(buf1,UN,Kbuft,Ddim)
 						buf1 = Kbuf-buf1
 						call matrixmul(KN2,buf1,GF%GaN,Ddim)
@@ -1676,13 +1896,13 @@ module integrand_fun
 				GF%KL = KL1+KL2+dconjg(transpose(KL1+KL2))
 				GF%KR = KR1+KR2+dconjg(transpose(KR1+KR2))
 				if(TdHS .and. NADi) GF%KN = KN1+KN2+dconjg(transpose(KN1+KN2))
-				
+
 				if(diag_int==0) deallocate(eiit,deiit)
 			end if
-			
+
 			! examine if necessary to update the K terms
 			if ((.not. TdHS) .and. (.not. NADi) .and. (abs(Vb)<=delta)) updateK = .false.
-			
+
 			! calculate QL/QR/QN
 			GF%QL = GF%KL                                                 ! QL term
 			call matrixmul(buf1,GF%LaL,GF%rho,Ddim)
@@ -1699,40 +1919,40 @@ module integrand_fun
 			call matrixmul(buf2,GF%rho,GF%GaR,Ddim)
 			GF%QR = GF%QR+(buf1+buf2)
 			if(TdHS .and. NADi) then                                      ! QN term
-				GF%QN = GF%KN                                                 
+				GF%QN = GF%KN
 				call matrixmul(buf1,GF%GaN,GF%rho,Ddim)
 				call matrixmul(buf2,GF%rho,GF%GaN,Ddim)
 				GF%QN = GF%QN+(buf1+buf2)
 			end if
-			
+
 			! calculate current of L/R electrode, nA  (Note whether factor 2 is double counted in rho )
 			if(u .eq. 1) then
 				IL = -real(ctrace(Ddim, GF%QL), kind=R_KIND)*e_over_hpa_pi*pi
 				IR = -real(ctrace(Ddim, GF%QR), kind=R_KIND)*e_over_hpa_pi*pi
 				IN = nil
 				if(TdHS .and. NADi) IN = real(ctrace(Ddim, GF%QN), kind=R_KIND)*e_over_hpa_pi*pi
-				
+
 				fpath = trim(fout) // "time-current.txt"
 				open(UNIT=112, FILE=trim(fpath), ACCESS="APPEND", STATUS="OLD", IOSTAT=ierr)
-				if(ierr /= 0) stop "integrand_fun: openning time-current.txt in default path is error!"	
-				write(112,'(I9,A,F20.15,A,F20.15,A,F20.15,A,F20.15,A,F20.9)') n, tab, tt, tab, IL, tab, IR, tab, IN, tab, real(ctrace(Ddim,GF%rho), kind=R_KIND)
+				if(ierr /= 0) stop "integrand_fun: openning time-current.txt in default path is error!"
+				write(112,'(I9,A,F20.15,A,F20.15,A,F20.15,A,F20.15,A,F20.9,A,F20.9)') n, tab, tt, tab, IL, tab, IR, tab, IN, tab, real(ctrace(Ddim,GF%rho), kind=R_KIND), tab, elowt-elow
 				close(112)
-                ! export orbital density
-                if(mod(n,n_export_orbit_rho)==0) then 
-                    ! diagonal part
-                    fpath = trim(fout) // "orbital_rho.txt"
+				! export orbital density
+				if(mod(n,n_export_orbit_rho)==0) then
+					! diagonal part
+					fpath = trim(fout) // "orbital_rho.txt"
 				    open(UNIT=113, FILE=trim(fpath), ACCESS="APPEND", STATUS="OLD", IOSTAT=ierr)
-				    if(ierr /= 0) stop "integrand_fun: openning orbital_rho.txt in default path is error!"	
-                    write(113,'(I9,A)',advance='no') n,tab
-                    do uu = 1,Ddim
-                        write(113,'(F12.7,A)',advance='no') real(GF%rho(uu,uu)),tab
-                    end do
+				    if(ierr /= 0) stop "integrand_fun: openning orbital_rho.txt in default path is error!"
+					write(113,'(I9,A)',advance='no') n,tab
+					do uu = 1,Ddim
+						write(113,'(F12.7,A)',advance='no') real(GF%rho(uu,uu)),tab
+					end do
 				    write(113,*) ""
 				    close(113)
-                    ! full rho matrix
-                    fpath = trim(fout) // "rho_matrix.txt"
+					! full rho matrix
+					fpath = trim(fout) // "rho_matrix.txt"
 	                open(UNIT=199, FILE=trim(fpath), STATUS="REPLACE", IOSTAT=ierr)
-	                if(ierr /= 0) stop "integrand_fun: openning rho_matrix.txt in default path is error!"	
+	                if(ierr /= 0) stop "integrand_fun: openning rho_matrix.txt in default path is error!"
 	                write(199,*) Ddim
 	                do i = 1, Ddim
 		                do j = 1, Ddim
@@ -1740,9 +1960,9 @@ module integrand_fun
 		                end do
 	                end do
 	                close(199)
-                end if
+				end if
 			end if
-			
+
 			if(TdHS .and. NADi) then
 				GF%Q = GF%QL+GF%QR+GF%QN
 			else
@@ -1751,11 +1971,11 @@ module integrand_fun
 			call matrixmul(buf1,GF%Hi,GF%rho,Ddim)
 			call matrixmul(buf2,GF%rho,GF%Hi,Ddim)
 			buf3 = -1.0_R_KIND*c_i*(buf1-buf2)-GF%Q
-			
+
 			! record slope function
 			if(u .eq. 1) then
 				k1 = buf3
-				GF%rho = rhobak+k1*(0.5_R_KIND*dt/(hpa*10.0_R_KIND**12))  
+				GF%rho = rhobak+k1*(0.5_R_KIND*dt/(hpa*10.0_R_KIND**12))
 			else if(u .eq. 2) then
 				k2 = buf3
 				GF%rho = rhobak+k2*(0.5_R_KIND*dt/(hpa*10.0_R_KIND**12))
@@ -1767,8 +1987,8 @@ module integrand_fun
 			end if
 		end do
 		! ================== end of Runge–Kutta methods ==============
-		
-		
+
+
 		! update rho
 		GF%rho =rhobak
 		buf1 = (k1+2.0_R_KIND*k2+2.0_R_KIND*k3+k4)/6.0_R_KIND
@@ -1778,7 +1998,7 @@ module integrand_fun
 			else if(DForder==2) then
 				GF%rho = bufold1*(4.0_R_KIND/3.0_R_KIND)-bufold2*(1.0_R_KIND/3.0_R_KIND)+ &
 						& buf1*(2.0_R_KIND/3.0_R_KIND)*(dt/(hpa*10.0_R_KIND**12))
-			else if(DForder==3) then                                           
+			else if(DForder==3) then
 				GF%rho = bufold1*(18.0_R_KIND/11.0_R_KIND)-bufold2*(9.0_R_KIND/11.0_R_KIND)+ &
 						& bufold3*(2.0_R_KIND/11.0_R_KIND)+buf1*(6.0_R_KIND/11.0_R_KIND)*(dt/(hpa*10.0_R_KIND**12))
 			else if(DForder==4 .or. DForder==5) then
@@ -1795,9 +2015,9 @@ module integrand_fun
 		else
 			if(DForder==1) then                                       ! Adams–Bashforth methods
 				buf3 = buf1
-			else if(DForder==2) then 
+			else if(DForder==2) then
 				buf3 = buf1*(1.5_R_KIND)-bufold1*(0.5_R_KIND)
-			else if(DForder==3) then                                           
+			else if(DForder==3) then
 				buf3 = buf1*(23.0_R_KIND/12.0_R_KIND)-bufold1*(16.0_R_KIND/12.0_R_KIND)+bufold2*(5.0_R_KIND/12.0_R_KIND)
 			else if(DForder==4) then
 				buf3 = buf1*(55.0_R_KIND/24.0_R_KIND)-bufold1*(59.0_R_KIND/24.0_R_KIND)+ &
@@ -1815,16 +2035,18 @@ module integrand_fun
 			bufold1 = buf1
 			GF%rho = GF%rho+buf3*(dt/(hpa*10.0_R_KIND**12))
 		end if
-			
-		
+
+
 		! show message
-		write(*,'(A30,F7.3,A2,A,\)') "solving time-dependent NEGF: ",100.0_R_KIND*n/ntstep," %",creturn
+		CALL CPU_TIME(timenow)
+		write(*,'(A30,F7.3,A4,F7.3,A,\)') "solving time-dependent NEGF: ",100.0_R_KIND*n/ntstep," %, ",(timenow-timeold)/ncpus,creturn
+		timeold=timenow
 	end do
 	write(*,*) ""
-	
-	
+
+
 	! free arrays
-	deallocate(Itdata)
+	deallocate(Itdata,exp_itp)
 	deallocate(heff,heff0,idty,sm,sm0,smold,bugx)
 	deallocate(bufold1,bufold2,bufold3,bufold4)
 	deallocate(buf1,buf2,buf3,bufn,bufm,bufn2,bufn3,bufp,bufq)
@@ -1833,32 +2055,45 @@ module integrand_fun
 	deallocate(k1,k2,k3,k4,rhobak)
 	deallocate(Hnow,Hnxt,Snow,Snxt,Snow_rcd,Snxt_rcd)
 	if(diag_int==0) deallocate(eii,deii)
-	
+
   end subroutine TDNEGF
-  
-  
+
+
   !....................................................................
   ! fermi distribution function
   !....................................................................
   real(R_KIND) function fermi(ex,ef)
-		real(R_KIND) :: ex, ef
-		fermi = 1.0_R_KIND/(1.0_R_KIND+dexp((ex-ef)/kbT))
+		integer :: idx
+		real(R_KIND) :: ex, ef, db1
+		db1=(ex-ef)/kbT
+		if(db1<exp_itp_low) then
+			fermi = 1.0_R_KIND
+		else if (db1>exp_itp_up) then
+		    fermi = 0.0_R_KIND
+		else
+			db1 = (db1-exp_itp_low)/exp_itp_de
+			idx=aint(db1)
+			db1=db1-idx
+			fermi = exp_itp(idx+1)*(1.0_R_KIND-db1)+exp_itp(idx+2)*db1
+			fermi = 1.0_R_KIND/(1.0_R_KIND+fermi)
+		end if
   end function fermi
-  
-  
+
+
   !....................................................................
   ! read hamiltonian/overlap matrixes h(t)/s(t) from file
   !....................................................................
   subroutine inputHSt(GF,ndim,tstep,orthbol_sw)
 	type(GFtype) :: GF
 	integer :: i, ndim, tstep,ierr
+	real(R_KIND), allocatable, dimension(:,:) :: datain
 	character(255) :: fpath,str, strdir
 	logical :: orthbol_sw
-	
+
 	write(str,*) mod(tstep,mdtstep)+1
 	i = anint(1.0_R_KIND*(tstep-mod(tstep,mdtstep))/mdtstep)
 	write(strdir,*) i+1
-	
+
 	! set hamiltonian/overlap matrix at tstep
 	! h matrix
 	write(fpath,*) trim(fi_hs),trim(adjustl(strdir)),trim("/hamil_step_"),trim(adjustl(str))
@@ -1868,10 +2103,14 @@ module integrand_fun
 		pause
 		open(UNIT=112, FILE=trim(fpath), STATUS="OLD", IOSTAT=ierr)
 	end do
+	allocate(datain(1,ndim))
 	do i = 1, ndim
-		read(112,*) GF%Hi(i,1:ndim)
+		read(112,*) datain
+		GF%Hi(i,1:ndim)=datain(1,:)
 	end do
 	close(112)
+	deallocate(datain)
+
 	!GF%Hi = GF%Hi*Hat2eV                           ! Hatree -> eV
 	write(*,*) "integrand_fun: ", trim(fpath), " was read!"
 	! s matrix
@@ -1882,19 +2121,23 @@ module integrand_fun
 		pause
 		open(UNIT=113, FILE=trim(fpath), STATUS="OLD", IOSTAT=ierr)
 	end do
+	allocate(datain(1,ndim))
 	do i = 1, ndim
-		read(113,*) GF%Si(i,1:ndim)
+		read(113,*) datain
+		GF%Si(i,1:ndim)=datain(1,:)
 	end do
 	close(113)
+	deallocate(datain)
+
 	GF%Si_rcd = GF%Si
 	write(*,*) "integrand_fun: ", trim(fpath), " was read!"
-	
+
 	if(orthbol_sw) call orthHS(GF%Hi, GF%Si, GF%Ddim)                    ! for orthogonal basis
 	return
-  end subroutine inputHSt 
-  
-  
-  
+  end subroutine inputHSt
+
+
+
   !................................................................................
   ! generate hamiltonian/overlap matrixes h(t)/s(t) using capacitance network model
   !................................................................................
@@ -1903,159 +2146,216 @@ module integrand_fun
 	integer :: i, j, k, ndim, tstep, ierr, ndevatm
 	real(R_KIND), allocatable, dimension(:) :: vm, qm
 	logical :: orthbol_sw
-	
-    ndevatm = size(GF%ccinv,1)
-    allocate(vm(ndevatm),qm(ndevatm))
+
+	ndevatm = size(GF%ccinv,1)
+	allocate(vm(ndevatm),qm(ndevatm))
 	GF%Hi = GF%HD
-    GF%Si = GF%SD
-    GF%Si_rcd = GF%SD
-    k=0
-    do i=1,size(GF%ccinv,1)
-        GF%rhotk(i) = GF%rhotj(i)
-        GF%rhotj(i) = GF%rhoti(i)
-        GF%rhoti(i) = -GF%rhot0(i)
-        do j=1,GF%numorb(i)
-            k=k+1
-            GF%rhoti(i)=GF%rhoti(i)+real(GF%rho(k,k))
-        end do
-    end do
-    
+	GF%Si = GF%SD
+	GF%Si_rcd = GF%SD
+	k=0
+	do i=1,size(GF%ccinv,1)
+		GF%rhotj(i) = GF%rhoti(i)
+		GF%rhoti(i) = -GF%rhot0(i)
+		do j=1,GF%numorb(i)
+			k=k+1
+			GF%rhoti(i)=GF%rhoti(i)+real(GF%rho(k,k))
+		end do
+	end do
+
 	if(orthbol_sw) call orthHS(GF%Hi, GF%Si, GF%Ddim)                    ! for orthogonal basis
-    do i=1,ndevatm
-        qm(i)=-GF%rhoti(i)+GF%Lcup(i)*GF%VL(tstep)+GF%Rcup(i)*GF%VR(tstep)
-    end do
-    do i=1,ndevatm
-        vm(i)=0.0
-        do j=1,ndevatm
-            vm(i)=vm(i)+GF%ccinv(i,j)*qm(j)
-        end do
-    end do
-    ! update Hi
-    k=0
-    do i=1,size(GF%ccinv,1)
-        do j=1,GF%numorb(i)
-            k=k+1
-            GF%Hi(k,k)=GF%Hi(k,k)-vm(i)      ! use negative to coincide with the definition in the propagation U(t)
-        end do
-    end do
-    deallocate(vm,qm)
+	do i=1,ndevatm
+		qm(i)=-GF%rhoti(i)+GF%Lcup(i)*GF%VL(tstep)+GF%Rcup(i)*GF%VR(tstep)
+	end do
+	do i=1,ndevatm
+		vm(i)=0.0
+		do j=1,ndevatm
+			vm(i)=vm(i)+GF%ccinv(i,j)*qm(j)
+		end do
+	end do
+	! update Hi
+	k=0
+	do i=1,size(GF%ccinv,1)
+		do j=1,GF%numorb(i)
+			k=k+1
+			GF%Hi(k,k)=GF%Hi(k,k)-vm(i)      ! use negative to coincide with the definition in the propagation U(t)
+		end do
+	end do
+	deallocate(vm,qm)
 	return
-  end subroutine inputHSt_cv 
-  
+  end subroutine inputHSt_cv
+
   subroutine inputHSt_cv_next(GF,ndim,tstep,orthbol_sw)
 	type(GFtype) :: GF
 	integer :: i, j, k, ndim, tstep, ierr, ndevatm
 	real(R_KIND), allocatable, dimension(:) :: vm, qm, rhonext
 	logical :: orthbol_sw
-	
-    ndevatm = size(GF%ccinv,1)
-    allocate(vm(ndevatm),qm(ndevatm), rhonext(ndevatm))
+
+	ndevatm = size(GF%ccinv,1)
+	allocate(vm(ndevatm),qm(ndevatm), rhonext(ndevatm))
 	GF%Hi = GF%HD
-    GF%Si = GF%SD
-    GF%Si_rcd = GF%SD
-    k=0
-    do i=1,size(GF%ccinv,1)
-        rhonext(i) = 3.0*GF%rhoti(i) - 3.0*GF%rhotj(i) + GF%rhotk(i)
-    end do
-    
+	GF%Si = GF%SD
+	GF%Si_rcd = GF%SD
+	k=0
+	do i=1,size(GF%ccinv,1)
+		rhonext(i) = 2.0*GF%rhoti(i) - GF%rhotj(i)
+	end do
+
 	if(orthbol_sw) call orthHS(GF%Hi, GF%Si, GF%Ddim)                    ! for orthogonal basis
-    do i=1,ndevatm
-        qm(i)=-rhonext(i)+GF%Lcup(i)*GF%VL(tstep)+GF%Rcup(i)*GF%VR(tstep)
-    end do
-    do i=1,ndevatm
-        vm(i)=0.0
-        do j=1,ndevatm
-            vm(i)=vm(i)+GF%ccinv(i,j)*qm(j)
-        end do
-    end do
-    ! update Hi
-    k=0
-    do i=1,size(GF%ccinv,1)
-        do j=1,GF%numorb(i)
-            k=k+1
-            GF%Hi(k,k)=GF%Hi(k,k)-vm(i)      ! use negative to coincide with the definition in the propagation U(t)
-        end do
-    end do
-    deallocate(vm,qm,rhonext)
+	do i=1,ndevatm
+		qm(i)=-rhonext(i)+GF%Lcup(i)*GF%VL(tstep)+GF%Rcup(i)*GF%VR(tstep)
+	end do
+	do i=1,ndevatm
+		vm(i)=0.0
+		do j=1,ndevatm
+			vm(i)=vm(i)+GF%ccinv(i,j)*qm(j)
+		end do
+	end do
+	! update Hi
+	k=0
+	do i=1,size(GF%ccinv,1)
+		do j=1,GF%numorb(i)
+			k=k+1
+			GF%Hi(k,k)=GF%Hi(k,k)-vm(i)      ! use negative to coincide with the definition in the propagation U(t)
+		end do
+	end do
+	deallocate(vm,qm,rhonext)
 	return
   end subroutine inputHSt_cv_next
-  
-  
-  
+
+
+
   !....................................................................
   ! retarded green function at t0
   !....................................................................
   real(R_KIND) function syst0(x)
 	real(R_KIND) :: x
 	complex(R_KIND) :: funs(Ddim,Ddim)
-	
+
 	funs = (x+c_i*delta*mag)*Sglb-Hglb
 	call matrixinv(funs, Ddim)
 	syst0= aimag(ctrace(Ddim,funs))*fermi(x,Ef)*(-2.0_R_KIND/pi)
   end function syst0
-  
-  
+
+
   !....................................................................
   ! retarded green function at t
   !....................................................................
   real(R_KIND) function syst(x)
 	real(R_KIND) :: x
 	complex(R_KIND) :: funs(Ddim,Ddim)
-	
+
 	funs = (x+c_i*delta*mag)*Sglb-Hglb
 	call matrixinv(funs, Ddim)
 	syst= aimag(ctrace(Ddim,funs))*fermi(x,Ef)*(-2.0_R_KIND/pi)
   end function syst
-  
-  
+
+
   !....................................................................
   ! real part and imaginary part of integrand1
   !....................................................................
   real(R_KIND) function integrand1_re(x)
-    real(R_KIND) :: x
+	real(R_KIND) :: x
 	complex(R_KIND) :: zval, res
-    integer :: tid
-    tid = OMP_GET_THREAD_NUM()+1
-	
+	integer :: tid
+	tid = OMP_GET_THREAD_NUM()+1
+
 	zval = zbufs(1,tid)
 	res = fermi(x,Ef)*1.0_R_KIND/(x-zval)
 	integrand1_re = real(res,kind=R_KIND)
   end function integrand1_re
   real(R_KIND) function integrand1_im(x)
-    real(R_KIND) :: x
+	real(R_KIND) :: x
 	complex(R_KIND) :: zval, res
-    integer :: tid
-    tid = OMP_GET_THREAD_NUM()+1
-	
+	integer :: tid
+	tid = OMP_GET_THREAD_NUM()+1
+
 	zval = zbufs(1,tid)
 	res = fermi(x,Ef)*1.0_R_KIND/(x-zval)
 	integrand1_im = aimag(res)
   end function integrand1_im
-  
-  
+
+
   !....................................................................
   ! real part and imaginary part of integrand2
   !....................................................................
   real(R_KIND) function integrand2_re(x)
-    real(R_KIND) :: x
+	real(R_KIND) :: x
 	complex(R_KIND) :: zval, res
-    integer :: tid
-    tid = OMP_GET_THREAD_NUM()+1
-	
+	integer :: tid
+	tid = OMP_GET_THREAD_NUM()+1
+
 	zval = zbufs(1,tid)
-	res = fermi(x,Ef)*cdexp(c_i*x*t_glb)/(x-zval) 
+	res = fermi(x,Ef)*exp(c_i*x*t_glb)/(x-zval)
 	integrand2_re = real(res,kind=R_KIND)
   end function integrand2_re
   real(R_KIND) function integrand2_im(x)
-    real(R_KIND) :: x
+	real(R_KIND) :: x
 	complex(R_KIND) :: zval, res
-    integer :: tid
-    tid = OMP_GET_THREAD_NUM()+1
-	
+	integer :: tid
+	tid = OMP_GET_THREAD_NUM()+1
+
 	zval = zbufs(1,tid)
-	res = fermi(x,Ef)*cdexp(c_i*x*t_glb)/(x-zval)
+	res = fermi(x,Ef)*exp(c_i*x*t_glb)/(x-zval)
 	integrand2_im = aimag(res)
   end function integrand2_im
-  
-  
+
+  !....................................................................
+  ! exponential integral function to replace incomplete gamma function at alpha=0
+  !....................................................................
+  function cdig2(alpha, x) result(fn_val)
+	complex (R_KIND), intent(in)  :: alpha
+	complex (R_KIND), intent(in)  :: x
+	complex (R_KIND)              :: fn_val
+	if(abs(alpha)>1.0e-15) then
+		write(*,*) "Warning! incorrect usage for incomplete gamma function (here, alpha == 0 only)."
+	end if
+	call e1z ( x, fn_val )
+	return
+  end function cdig2
+
+  !....................................................................
+  ! full-range incomplete gamma function X exp function
+  !....................................................................
+  function cdig_fun(alpha, x) result(fn_val)
+	real (R_KIND) :: rval
+	complex (R_KIND)  :: alpha
+	complex (R_KIND)  :: x
+	complex (R_KIND)  :: fn_val, fn_val1, fn_val2
+	rval = abs(real(x,kind=R_KIND))
+	if(rval<gamma_thrd) then
+		!call e1z ( x, fn_val ) ! exponential integral (replacing incomplete gamma function at alpha=0)
+		fn_val = cdig(alpha, x) ! incomplete gamma function
+		fn_val = fn_val*exp(x)
+	else if(rval>=gamma_thrd .and. rval<(gamma_thrd+5.0_R_KIND)) then
+		fn_val1 = cdig(alpha, x) ! incomplete gamma function
+		fn_val1 = fn_val1*exp(x)
+		fn_val2 = cdig_inf_apprx(x)
+		rval=(rval-gamma_thrd)/5.0_R_KIND
+		fn_val = (1.0_R_KIND-rval)*fn_val1+rval*fn_val2
+	else
+		fn_val = cdig_inf_apprx(x)
+	end if
+	return
+  end function cdig_fun
+  function cdig_inf_apprx(xi) result(fn_vali)
+	complex (R_KIND), intent(in)  :: xi
+	integer :: nn
+	real (R_KIND) :: cf(17)=(/ 1.0_R_KIND, 2.0_R_KIND, 6.0_R_KIND, 24.0_R_KIND, 120.0_R_KIND, 720.0_R_KIND, 5040.0_R_KIND, &
+		& 40320.0_R_KIND, 362880.0_R_KIND, 3628800.0_R_KIND, 39916800.0_R_KIND, 479001600.0_R_KIND, 6227020800.0_R_KIND, &
+		& 87178291200.0_R_KIND, 1307674368000.0_R_KIND, 20922789888000.0_R_KIND, 355687428096000.0_R_KIND /)
+	complex (R_KIND)              :: z1
+	complex (R_KIND)              :: fn_vali
+	fn_vali = c_one/xi
+	z1 = xi
+	do nn = 1,16
+		z1 = z1*xi
+		if(mod(nn,2)==0) then
+			fn_vali = fn_vali+cf(nn)/z1
+		else
+			fn_vali = fn_vali-cf(nn)/z1
+		end if
+	end do
+	return
+  end function cdig_inf_apprx
+
 end module integrand_fun

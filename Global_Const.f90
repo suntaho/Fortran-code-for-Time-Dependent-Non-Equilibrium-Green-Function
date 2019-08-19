@@ -1,7 +1,7 @@
 !======================================================================
 !    Global parameters and variables
 !======================================================================
-    
+	
 module globaldef
   implicit none
   integer, parameter :: R_KIND = selected_real_kind(15)
@@ -14,12 +14,13 @@ module globaldef
   real(R_KIND), parameter :: hpa = 6.5821188926_R_KIND*10.0_R_KIND**(-16)
   real(R_KIND), parameter :: e_over_hpa_pi = 0.00007748091697940347_R_KIND
   real(R_KIND):: omega = 0.0_R_KIND*10.0_R_KIND**(15)                 ! angular frequency of AC voltage
+  real(R_KIND), parameter :: gamma_thrd = 25.0_R_KIND                ! threshold of variable's real-part to avoid divergence of incomplete gamma function (dimensionless)
   
   ! user-defined variables
   integer, parameter :: nitgl = 1999                                  ! maximum number of pints for integral function
-  integer :: ntstep = 9999
+  integer :: ntstep = 99999
   integer, parameter :: mdtstep = 99                                  ! time step in MD(Gromacs) setup, for inputHS
-  integer :: ntstep_pre = 10
+  integer :: ntstep_pre = 100
   real(R_KIND) :: dt_std = 0.000005_R_KIND                            ! time interval (ps) for standard time-dependent solution
   real(R_KIND) :: dt_pre = 0.000005_R_KIND                            ! time interval (ps) for equilibrium of initial charge density 
   real(R_KIND) :: Vb = 0.05_R_KIND                                     ! voltage for symmetric bias (V) 
@@ -32,17 +33,17 @@ module globaldef
   logical :: NADi = .false.                                           ! consider electron-nucleus (non-adiabatic) coupling or not, not work in present version
   logical :: readrho = .false.                                        ! read inital rho from existed file
   real(R_KIND) :: fEN = 1.0_R_KIND                                    ! scaling the strength of electron-nucleus (non-adiabatic) coupling
-  real(R_KIND) :: elow = -10.0_R_KIND, ehigh, dee = 0.01_R_KIND       ! grid for energy integration 
+  real(R_KIND) :: elow = -10.0_R_KIND, ehigh, ehigh_apx, dee = 0.01_R_KIND       ! grid for energy integration 
   real(R_KIND) :: kbT = (297.0_R_KIND)*8.61734215_R_KIND*10.0_R_KIND**(-5)     ! thermal energy (eV)
   integer :: DForder = 1                                              ! the order for solving differential equation, 1-5 (1-4 for BDF method)
   logical :: BDF = .false.                                            ! Backward differentiation method(BDF), if .false., use Adams–Bashforth method   
   logical :: orthbol = .true.                                         ! generator hamiltoain having orthogonal basis by given h/s matrix, set true in this version
   logical :: t0_intgl_search = .true.                                 ! find integral subdivision for t0 functions by math. library
-  logical :: t_intgl_search = .false.                                 ! find integral subdivision for t functions by math. library
+  logical :: t_intgl_search = .true.                                 ! find integral subdivision for t functions by math. library
   logical :: cv_model = .true.                                        ! switch to use capacitance network model or not, note that H/S will use time-independent (t=0) values in this version   
   ! switch integral approach
-  integer :: diag_int = 1                                             ! (0): slow adaptive Gauss–Legendre quadrature for integration; SLOW speed (only consider states near fermi level)
-                                                                      ! (1): diagonal integral with fermi-dirac fun; MEDIUM speed and stable
+  integer :: diag_int = 0                                             ! (0): slow adaptive Gauss–Legendre quadrature for integration; SLOW speed (only consider states near fermi level)
+																	  ! (1): diagonal integral with fermi-dirac fun; MEDIUM speed and stable
 																	  ! (2): diagonal integral with zero-temperature fermi-dirac fun; FAST speed
   ! Gauss–Legendre quadrature 
   integer :: GLpnt = 3                                                ! Gauss rule for numerical integral of functions: 1-5
@@ -67,6 +68,9 @@ module globaldef
   real(R_KIND), allocatable, dimension(:,:) :: alist_m,blist_m,rlist_m,elist_m
   integer, allocatable, dimension(:,:) :: iord_m, level_m, ndin_m
   
+  real(R_KIND) :: exp_itp_low=-50.0_R_KIND, exp_itp_up=50.0_R_KIND, exp_itp_de=0.0001_R_KIND
+  real(R_KIND), allocatable, dimension(:) :: exp_itp
+  
   ! filepath
   character(255) :: fi_t0 = "input//"
   character(255) :: fi_hs = "input//"
@@ -75,13 +79,13 @@ module globaldef
   ! green function
   type :: GFtype
 	integer :: tdim, Ldim, Rdim, Ddim                                 ! matrix dimensions for Total/L-lead/R-lead/Device partition
-    integer, allocatable, dimension(:) :: numorb                      ! number of orbitals each atom
+	integer, allocatable, dimension(:) :: numorb                      ! number of orbitals each atom
 	real(R_KIND) :: Ef                                                ! Fermi energy
 	real(R_KIND), allocatable, dimension(:) :: VL, VR                 ! time series for L/R bias
-    real(R_KIND), allocatable, dimension(:) :: Lcup, Rcup             ! capacitance vector for the coupling between device and lead
-    real(R_KIND), allocatable, dimension(:,:) :: ccinv                ! inverse of the capacitance-netwwork matrix
-    real(R_KIND), allocatable, dimension(:) :: rhot0
-    real(R_KIND), allocatable, dimension(:) :: rhoti, rhotj, rhotk
+	real(R_KIND), allocatable, dimension(:) :: Lcup, Rcup             ! capacitance vector for the coupling between device and lead
+	real(R_KIND), allocatable, dimension(:,:) :: ccinv                ! inverse of the capacitance-netwwork matrix
+	real(R_KIND), allocatable, dimension(:) :: rhot0
+	real(R_KIND), allocatable, dimension(:) :: rhoti, rhotj
 	complex(R_KIND), allocatable, dimension(:,:) :: HL, HR, SL, SR
 	complex(R_KIND), allocatable, dimension(:,:) :: GD, QL, QR, QN, Q, rho
 	complex(R_KIND), allocatable, dimension(:,:) :: GLs, GRs          ! surface green functions of electrodes 
@@ -120,6 +124,6 @@ module globaldef
   
   end module globaldef
 
-    
-    
-    
+	
+	
+	
