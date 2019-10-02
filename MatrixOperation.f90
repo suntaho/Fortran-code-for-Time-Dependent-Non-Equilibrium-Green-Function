@@ -6,10 +6,44 @@ module matrixoperation
 
 	contains
 	!....................................................................
+	! inversely-transform hamiltonian from orthogonal basis to natural orbitals  
+	! h will be updated under definition of natural-orbital basis, 
+	! s will be changed into identity matrix
+	!....................................................................
+	subroutine orthHSinv(h, s, nd)
+		implicit none
+
+		integer :: nd
+		complex(R_KIND) :: h(nd,nd), s(nd,nd)
+		integer :: i, j
+		complex(R_KIND), allocatable :: u(:,:), buf1(:,:), buf2(:,:), ucjg(:,:)
+		
+		allocate(buf1(nd,nd),buf2(nd,nd),ucjg(nd,nd),u(nd,nd))
+		forall(i=1:nd,j=1:nd) u(i,j) = c_nil
+		do j=1,nd                                                     ! upper half of s 
+			do i=1,j
+				u(i,j) = s(i,j)
+			end do
+		end do
+		call cholesky(u, nd)
+		ucjg = conjg(transpose(u))
+		call matrixinv(u, nd)
+		call matrixinv(ucjg, nd)
+		! calculate h with orthogonal basis
+		call matrixmul(buf1, h, ucjg, nd)
+		call matrixmul(buf2, u, buf1, nd)
+		! update h/s
+		call matrixmul(h, buf2, s, nd)
+		forall(i=1:nd,j=1:nd) s(i,j) = c_nil
+		forall(i=1:nd) s(i,i) = c_one
+		deallocate(buf1,buf2,u,ucjg)
+		return
+	end subroutine orthHSinv
+	!....................................................................
 	! generate hamiltonian having orthogonal basis by given h/s  
 	! h will be updated under definition of orthogonal basis, 
 	! s will be changed into identity matrix
-	!....................................................................
+	!....................................................................	
 	subroutine orthHS(h, s, nd)
 		implicit none
 

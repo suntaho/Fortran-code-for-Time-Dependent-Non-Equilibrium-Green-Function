@@ -91,7 +91,8 @@ module gfun
   
   
   !....................................................................
-  ! calculate selfenergy of L/R electrodes, with frequency/energy representation
+  ! calculate selfenergy of L/R electrodes, with frequency/energy representation,
+  ! using Ef=0, in this version.
   !....................................................................
   subroutine selfenergyLR(GF,Ex)
 	type(GFtype) :: GF
@@ -137,7 +138,8 @@ module gfun
   
   
   !....................................................................
-  ! calculate surface green function of electrodes by other model
+  ! calculate surface green function of electrodes by other model,
+  ! re-arrange matrix elements with repsect to given hamiltonian
   !....................................................................
   subroutine surfaceGF_model(GF,Ex)
 	type(GFtype) :: GF
@@ -279,6 +281,7 @@ module gfun
 
   !....................................................................
   ! calculate surface green function of electrodes, method described in note
+  ! re-arrange matrix elements with repsect to given hamiltonian
   !....................................................................
   subroutine surfaceGF(GF,Ex)
 	type(GFtype) :: GF

@@ -1937,6 +1937,10 @@ module integrand_fun
 				if(ierr /= 0) stop "integrand_fun: openning time-current.txt in default path is error!"
 				write(112,'(I9,A,F20.15,A,F20.15,A,F20.15,A,F20.15,A,F20.9,A,F20.9)') n, tab, tt, tab, IL, tab, IR, tab, IN, tab, real(ctrace(Ddim,GF%rho), kind=R_KIND), tab, elowt-elow
 				close(112)
+				
+				! NOTE. please call orthHSinv() to recover GF%rho with respect to natural orbital. 
+				! The build-in GF%rho function is defined by orthogonized basis to validate green function formulae.
+				
 				! export orbital density
 				if(mod(n,n_export_orbit_rho)==0) then
 					! diagonal part
